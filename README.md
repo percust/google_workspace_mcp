@@ -27,6 +27,47 @@
 
 ---
 
+<div align="center">
+<table>
+<tr>
+<td align="center">
+<b>⚡ Start</b><br>
+<sub>
+<a href="#quick-start">Quick Start</a> · <a href="#prerequisites">Prerequisites</a><br>
+<a href="#configuration">Google Cloud</a> · <a href="#-credential-configuration">Credentials</a>
+</sub>
+</td>
+<td align="center">
+<b>🧰 Tools</b><br>
+<sub>
+<a href="#-available-tools">All Tools</a> · <a href="#tool-tiers">Tool Tiers</a><br>
+<a href="#cli">CLI</a> · <a href="#start-the-server">Start Server</a>
+</sub>
+</td>
+<td align="center">
+<b>🔌 Connect</b><br>
+<sub>
+<a href="#one-click-claude-desktop-install-claude-desktop-only-stdio-single-user">1-Click Install</a> · <a href="#connect-to-claude-desktop">Claude Desktop</a><br>
+<a href="#claude-code-mcp-client-support">Claude Code</a> · <a href="#vs-code-mcp-client-support">VS Code</a> · <a href="#connect-to-lm-studio">LM Studio</a>
+</sub>
+</td>
+<td align="center">
+<b>🚀 Deploy</b><br>
+<sub>
+<a href="#oauth-21-support-multi-user-bearer-token-authentication">OAuth 2.1</a> · <a href="#stateless-mode-container-friendly">Stateless</a><br>
+<a href="#external-oauth-21-provider-mode">External OAuth</a> · <a href="#reverse-proxy-setup">Reverse Proxy</a>
+</sub>
+</td>
+<td align="center">
+<b>📐 Develop</b><br>
+<sub>
+<a href="#-development">Architecture</a> · <a href="#local-development-setup">Dev Setup</a><br>
+<a href="#-security">Security</a> · <a href="#-license">License</a>
+</sub>
+</td>
+</tr>
+</table>
+</div>
 
 **See it in action:**
 <div align="center">
