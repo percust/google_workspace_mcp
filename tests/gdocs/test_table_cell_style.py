@@ -42,7 +42,7 @@ class TestBuildTableCellStyle:
         )
         for border_name in ("borderTop", "borderBottom", "borderLeft", "borderRight"):
             assert style[border_name]["width"] == {"magnitude": 1.5, "unit": "PT"}
-            assert style[border_name]["color"]["rgbColor"] == {
+            assert style[border_name]["color"]["color"]["rgbColor"] == {
                 "red": 1.0,
                 "green": 0.0,
                 "blue": 0.0,
@@ -134,6 +134,17 @@ class TestBatchManagerIntegration:
         assert "backgroundColor" in inner["fields"]
         assert "table cell style at 42" in desc
 
+    def test_build_request_rejects_invalid_table_cell_style_params(self, manager):
+        with pytest.raises(ValueError, match="border_width must be positive"):
+            manager._build_operation_request(
+                {
+                    "type": "update_table_cell_style",
+                    "table_start_index": 42,
+                    "border_width": -1,
+                },
+                "update_table_cell_style",
+            )
+
     @pytest.mark.asyncio
     async def test_end_to_end_execute_table_cell_style(self, manager):
         manager._execute_batch_requests = AsyncMock(return_value={"replies": [{}]})
@@ -149,6 +160,29 @@ class TestBatchManagerIntegration:
         )
         assert success
         assert meta["operations_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_end_to_end_surfaces_invalid_table_cell_style_params(self, manager):
+        success, message, meta = await manager.execute_batch_operations(
+            "doc-123",
+            [
+                {
+                    "type": "update_table_cell_style",
+                    "table_start_index": 42,
+                    "border_width": -1,
+                }
+            ],
+        )
+        assert not success
+        assert "border_width must be positive" in message
+        assert meta == {}
+
+    def test_supported_operations_include_table_cell_style(self, manager):
+        supported = manager.get_supported_operations()["supported_operations"]
+        assert "update_table_cell_style" in supported
+        assert supported["update_table_cell_style"]["required"] == [
+            "table_start_index"
+        ]
 
 
 class TestPublicToolWiring:

@@ -25,6 +25,7 @@ from gdocs.docs_helpers import (
     create_update_doc_tab_request,
     validate_operation,
 )
+from gdocs.managers.validation_manager import ValidationManager
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ class BatchOperationManager:
             service: Google Docs API service instance
         """
         self.service = service
+        self.validation_manager = ValidationManager()
 
     async def execute_batch_operations(
         self, document_id: str, operations: list[dict[str, Any]]
@@ -293,6 +295,18 @@ class BatchOperationManager:
             description = f"paragraph style {op['start_index']}-{op['end_index']} ({', '.join(style_changes)})"
 
         elif op_type == "update_table_cell_style":
+            is_valid, error_msg = self.validation_manager.validate_table_cell_style_params(
+                background_color=op.get("background_color"),
+                border_color=op.get("border_color"),
+                border_width=op.get("border_width"),
+                row_index=op.get("row_index"),
+                column_index=op.get("column_index"),
+                row_span=op.get("row_span"),
+                column_span=op.get("column_span"),
+            )
+            if not is_valid:
+                raise ValueError(error_msg)
+
             request = create_update_table_cell_style_request(
                 table_start_index=op["table_start_index"],
                 background_color=op.get("background_color"),
@@ -525,6 +539,19 @@ class BatchOperationManager:
                         "named_style_type",
                     ],
                     "description": "Apply paragraph-level styling (headings, named styles like TITLE/SUBTITLE, alignment, spacing, indentation)",
+                },
+                "update_table_cell_style": {
+                    "required": ["table_start_index"],
+                    "optional": [
+                        "background_color",
+                        "border_color",
+                        "border_width",
+                        "row_index",
+                        "column_index",
+                        "row_span",
+                        "column_span",
+                    ],
+                    "description": "Apply table cell styling to an entire table or a targeted cell range",
                 },
                 "insert_table": {
                     "required": ["index", "rows", "columns"],

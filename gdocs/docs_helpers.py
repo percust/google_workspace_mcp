@@ -258,7 +258,7 @@ def build_table_cell_style(
 
         if border_color is not None:
             rgb = _normalize_color(border_color, "border_color")
-            border_style["color"] = {"rgbColor": rgb}
+            border_style["color"] = {"color": {"rgbColor": rgb}}
 
         for border_name in ("borderTop", "borderBottom", "borderLeft", "borderRight"):
             table_cell_style[border_name] = border_style.copy()
