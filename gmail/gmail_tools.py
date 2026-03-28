@@ -285,10 +285,8 @@ def _format_message_header_lines(
     content_lines.extend(
         [
             f"Subject: {subject}",
-            f"From:    {sender}" if not message_id else f"From: {sender}",
-            f"Date:    {headers.get('Date', '(unknown date)')}"
-            if not message_id
-            else f"Date: {headers.get('Date', '(unknown date)')}",
+            f"From: {sender}",
+            f"Date: {headers.get('Date', '(unknown date)')}",
         ]
     )
 
@@ -299,9 +297,9 @@ def _format_message_header_lines(
     if references:
         content_lines.append(f"References: {references}")
     if to:
-        content_lines.append(f"To:      {to}" if not message_id else f"To: {to}")
+        content_lines.append(f"To: {to}")
     if cc:
-        content_lines.append(f"Cc:      {cc}" if not message_id else f"Cc: {cc}")
+        content_lines.append(f"Cc: {cc}")
     if list_unsub:
         content_lines.append(f"List-Unsubscribe: {list_unsub}")
     if precedence:
@@ -1064,10 +1062,6 @@ async def get_gmail_message_content(
     headers = _extract_headers(
         message_metadata.get("payload", {}), GMAIL_METADATA_HEADERS
     )
-    subject = headers.get("Subject", "(no subject)")
-    sender = headers.get("From", "(unknown sender)")
-    to = headers.get("To", "")
-    cc = headers.get("Cc", "")
 
     # Handle raw format separately - fetch with format="raw" and return decoded MIME
     if body_format == "raw":
@@ -1107,38 +1101,7 @@ async def get_gmail_message_content(
     # Extract attachment metadata
     attachments = _extract_attachments(payload)
 
-    content_lines = [
-        f"Subject: {subject}",
-        f"From:    {sender}",
-        f"Date:    {headers.get('Date', '(unknown date)')}",
-    ]
-
-    rfc822_msg_id = headers.get("Message-ID", "")
-    if rfc822_msg_id:
-        content_lines.append(f"Message-ID: {rfc822_msg_id}")
-
-    in_reply_to = headers.get("In-Reply-To", "")
-    references = headers.get("References", "")
-    if in_reply_to:
-        content_lines.append(f"In-Reply-To: {in_reply_to}")
-    if references:
-        content_lines.append(f"References: {references}")
-
-    if to:
-        content_lines.append(f"To:      {to}")
-    if cc:
-        content_lines.append(f"Cc:      {cc}")
-
-    list_unsub = headers.get("List-Unsubscribe", "")
-    precedence = headers.get("Precedence", "")
-    list_id = headers.get("List-Id", "")
-    if list_unsub:
-        content_lines.append(f"List-Unsubscribe: {list_unsub}")
-    if precedence:
-        content_lines.append(f"Precedence: {precedence}")
-    if list_id:
-        content_lines.append(f"List-Id: {list_id}")
-
+    content_lines = _format_message_header_lines(headers)
     content_lines.append(f"\n--- BODY ---\n{body_data or '[No text/plain body found]'}")
 
     # Add attachment information if present
@@ -1304,10 +1267,7 @@ async def get_gmail_messages_content_batch(
                         _format_message_header_lines(headers, message_id=mid)
                     )
                     msg_output += f"\nWeb Link: {_generate_gmail_web_url(mid)}\n"
-                    if body_format == "raw":
-                        msg_output += f"\n--- {body_label} ---\n{body_data}\n"
-                    else:
-                        msg_output += f"\n{body_data}\n"
+                    msg_output += f"\n--- {body_label} ---\n{body_data}\n"
 
                     output_messages.append(msg_output)
 

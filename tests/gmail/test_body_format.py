@@ -1,13 +1,9 @@
 """Tests for Gmail body_format support across helper and public tool APIs."""
 
 import base64
-import os
-import sys
 from unittest.mock import Mock
 
 import pytest
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 import gmail.gmail_tools as gmail_tools
 from gmail.gmail_tools import (
@@ -294,6 +290,11 @@ async def test_get_gmail_message_content_returns_raw_mime():
 
     assert "--- RAW MIME ---" in result
     assert "Raw MIME body" in result
+    assert "From: sender@example.com" in result
+    assert "Date: Fri, 28 Mar 2026 10:00:00 -0400" in result
+    assert "To: recipient@example.com" in result
+    assert "Cc: cc@example.com" in result
+    assert "From:    " not in result
 
 
 @pytest.mark.asyncio
@@ -362,6 +363,27 @@ async def test_get_gmail_messages_content_batch_supports_raw_format():
     ]
     assert formats.count("metadata") == 1
     assert formats.count("raw") == 1
+
+
+@pytest.mark.asyncio
+async def test_get_gmail_messages_content_batch_default_text_format():
+    service = _build_service(
+        message_responses={
+            ("msg-1", "full"): _message_response(
+                "msg-1", text="Plain text body", html="<p>HTML body</p>"
+            ),
+        }
+    )
+
+    result = await _unwrap(get_gmail_messages_content_batch)(
+        service=service,
+        message_ids=["msg-1"],
+        user_google_email="user@example.com",
+    )
+
+    assert "Plain text body" in result
+    assert "--- BODY ---" in result
+    assert "--- RAW MIME ---" not in result
 
 
 @pytest.mark.asyncio
@@ -448,3 +470,8 @@ async def test_get_gmail_message_content_preserves_html_format():
     )
 
     assert "<p><b>HTML</b></p>" in result
+    assert "From: sender@example.com" in result
+    assert "Date: Fri, 28 Mar 2026 10:00:00 -0400" in result
+    assert "To: recipient@example.com" in result
+    assert "Cc: cc@example.com" in result
+    assert "From:    " not in result
