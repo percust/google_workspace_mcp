@@ -9,6 +9,12 @@ import logging
 import asyncio
 from typing import Any, Optional
 
+from gdocs.docs_helpers import (
+    create_create_header_footer_request,
+    create_delete_range_request,
+    create_insert_text_request,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -75,14 +81,23 @@ class HeaderFooterManager:
             )
 
             if not target_section:
-                return (
-                    False,
-                    f"No {section_type} found in document. Please create a {section_type} first in Google Docs.",
+                created_id = await self._create_missing_section(document_id, section_type)
+                if not created_id:
+                    return (
+                        False,
+                        f"No {section_type} found in document and automatic creation failed",
+                    )
+                doc = await self._get_document(document_id)
+                target_section = (
+                    doc.get("headers", {}).get(created_id)
+                    if section_type == "header"
+                    else doc.get("footers", {}).get(created_id)
                 )
+                section_id = created_id
 
             # Update the content
             success = await self._replace_section_content(
-                document_id, target_section, content
+                document_id, target_section, content, section_id
             )
 
             if success:
@@ -154,7 +169,11 @@ class HeaderFooterManager:
         return None, None
 
     async def _replace_section_content(
-        self, document_id: str, section: dict[str, Any], new_content: str
+        self,
+        document_id: str,
+        section: dict[str, Any],
+        new_content: str,
+        section_id: str,
     ) -> bool:
         """
         Replace the content in a header or footer section.
@@ -171,14 +190,13 @@ class HeaderFooterManager:
         if not content_elements:
             return False
 
-        # Find the first paragraph to replace content
         first_para = self._find_first_paragraph(content_elements)
         if not first_para:
-            return False
-
-        # Calculate content range
-        start_index = first_para.get("startIndex", 0)
-        end_index = first_para.get("endIndex", 0)
+            start_index = 0
+            end_index = 0
+        else:
+            start_index = first_para.get("startIndex", 0)
+            end_index = first_para.get("endIndex", 0)
 
         # Build requests to replace content
         requests = []
@@ -186,19 +204,20 @@ class HeaderFooterManager:
         # Delete existing content if any (preserve paragraph structure)
         if end_index > start_index:
             requests.append(
-                {
-                    "deleteContentRange": {
-                        "range": {
-                            "startIndex": start_index,
-                            "endIndex": end_index - 1,  # Keep the paragraph end marker
-                        }
-                    }
-                }
+                create_delete_range_request(
+                    start_index,
+                    end_index - 1,  # Preserve the trailing paragraph marker
+                    segment_id=section_id,
+                )
             )
 
         # Insert new content
         requests.append(
-            {"insertText": {"location": {"index": start_index}, "text": new_content}}
+            create_insert_text_request(
+                start_index,
+                new_content,
+                segment_id=section_id,
+            )
         )
 
         try:
@@ -212,6 +231,30 @@ class HeaderFooterManager:
         except Exception as e:
             logger.error(f"Failed to replace section content: {str(e)}")
             return False
+
+    async def _create_missing_section(
+        self, document_id: str, section_type: str
+    ) -> Optional[str]:
+        """Create a missing header/footer and return its new segment ID."""
+        request = create_create_header_footer_request(section_type, "DEFAULT")
+        try:
+            result = await asyncio.to_thread(
+                self.service.documents()
+                .batchUpdate(documentId=document_id, body={"requests": [request]})
+                .execute
+            )
+        except Exception as e:
+            logger.error(f"Failed to create missing {section_type}: {str(e)}")
+            return None
+
+        replies = result.get("replies", [])
+        if not replies:
+            return None
+
+        reply = replies[0]
+        if section_type == "header":
+            return reply.get("createHeader", {}).get("headerId")
+        return reply.get("createFooter", {}).get("footerId")
 
     def _find_first_paragraph(
         self, content_elements: list[dict[str, Any]]

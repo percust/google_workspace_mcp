@@ -704,17 +704,17 @@ Saved files expire after 1 hour and are cleaned up automatically.
 |------|------|-------------|
 | <sub>`get_doc_content`</sub> | <sub>Core</sub> | <sub>Extract document text</sub> |
 | <sub>`create_doc`</sub> | <sub>Core</sub> | <sub>Create new documents</sub> |
-| <sub>`modify_doc_text`</sub> | <sub>Core</sub> | <sub>Modify document text (formatting + links)</sub> |
+| <sub>`modify_doc_text`</sub> | <sub>Core</sub> | <sub>Insert, replace, and richly format text with tab/segment targeting, append-to-segment support, advanced typography, and link management</sub> |
 | <sub>`search_docs`</sub> | <sub>Extended</sub> | <sub>Find documents by name</sub> |
 | <sub>`find_and_replace_doc`</sub> | <sub>Extended</sub> | <sub>Find and replace text</sub> |
 | <sub>`list_docs_in_folder`</sub> | <sub>Extended</sub> | <sub>List docs in folder</sub> |
 | <sub>`insert_doc_elements`</sub> | <sub>Extended</sub> | <sub>Add tables, lists, page breaks</sub> |
-| <sub>`update_paragraph_style`</sub> | <sub>Extended</sub> | <sub>Apply heading styles, lists (bulleted/numbered with nesting), and paragraph formatting</sub> |
+| <sub>`update_paragraph_style`</sub> | <sub>Extended</sub> | <sub>Apply advanced paragraph styling including headings, spacing, direction, pagination controls, shading, and bulleted/numbered/checkbox lists with nesting</sub> |
 | <sub>`get_doc_as_markdown`</sub> | <sub>Extended</sub> | <sub>Export document as formatted Markdown with optional comments</sub> |
 | <sub>`insert_doc_image`</sub> | <sub>Complete</sub> | <sub>Insert images from Drive/URLs</sub> |
-| <sub>`update_doc_headers_footers`</sub> | <sub>Complete</sub> | <sub>Modify headers and footers</sub> |
-| <sub>`batch_update_doc`</sub> | <sub>Complete</sub> | <sub>Execute multiple operations</sub> |
-| <sub>`inspect_doc_structure`</sub> | <sub>Complete</sub> | <sub>Analyze document structure</sub> |
+| <sub>`update_doc_headers_footers`</sub> | <sub>Complete</sub> | <sub>Create or update headers and footers with correct segment-aware writes</sub> |
+| <sub>`batch_update_doc`</sub> | <sub>Complete</sub> | <sub>Execute atomic multi-step Docs API operations including named ranges, section breaks, document/section layout, header/footer creation, segment-aware inserts, images, tables, and rich formatting</sub> |
+| <sub>`inspect_doc_structure`</sub> | <sub>Complete</sub> | <sub>Analyze document structure, including safe insertion points, tables, section breaks, headers/footers, and named ranges</sub> |
 | <sub>`export_doc_to_pdf`</sub> | <sub>Extended</sub> | <sub>Export document to PDF</sub> |
 | <sub>`create_table_with_data`</sub> | <sub>Complete</sub> | <sub>Create data tables</sub> |
 | <sub>`debug_table_structure`</sub> | <sub>Complete</sub> | <sub>Debug table issues</sub> |
