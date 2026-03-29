@@ -82,6 +82,7 @@ class TestHeaderFooterGuardrails:
         requests = docs_api.batchUpdate.call_args.kwargs["body"]["requests"]
         assert len(requests) == 1
         assert "insertText" in requests[0]
+        assert requests[0]["insertText"]["endOfSegmentLocation"] == {"segmentId": "hdr-123"}
 
     @pytest.mark.asyncio
     async def test_batch_update_doc_duplicate_header_creation_returns_guidance(self):

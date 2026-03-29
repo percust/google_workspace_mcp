@@ -283,6 +283,7 @@ class HeaderFooterManager:
         """
         content_elements = section.get("content", []) if section else []
         first_para = self._find_first_paragraph(content_elements)
+        has_meaningful_content = self._segment_has_meaningful_content(content_elements)
         if first_para:
             start_index = first_para.get("startIndex", 0)
             end_index = first_para.get("endIndex", 0)
@@ -296,7 +297,7 @@ class HeaderFooterManager:
         # Delete existing content if any (preserve paragraph structure)
         # Docs segments often contain a single empty paragraph marker. Deleting
         # start..end-1 in that case produces an empty range, which the API rejects.
-        if end_index - start_index > 1:
+        if has_meaningful_content and end_index - start_index > 1:
             requests.append(
                 create_delete_range_request(
                     start_index,
@@ -307,7 +308,7 @@ class HeaderFooterManager:
             )
 
         # Insert new content
-        if first_para:
+        if first_para and has_meaningful_content:
             requests.append(
                 create_insert_text_request(
                     start_index,
@@ -343,6 +344,26 @@ class HeaderFooterManager:
                 False,
                 f"Failed to write {section_id} segment content: {str(e)}",
             )
+
+    def _segment_has_meaningful_content(
+        self, content_elements: list[dict[str, Any]]
+    ) -> bool:
+        """
+        Return True when a header/footer segment contains user-visible text beyond
+        the default empty paragraph marker.
+        """
+        for element in content_elements:
+            paragraph = element.get("paragraph")
+            if not paragraph:
+                continue
+            for para_element in paragraph.get("elements", []):
+                text_run = para_element.get("textRun")
+                if not text_run:
+                    continue
+                content = text_run.get("content", "")
+                if content.strip():
+                    return True
+        return False
 
     async def _create_missing_section(
         self, document_id: str, section_type: str, header_footer_type: str = "DEFAULT"
