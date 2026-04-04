@@ -41,7 +41,7 @@ class TableOperationManager:
         table_data: List[List[str]],
         index: int,
         bold_headers: bool = True,
-        tab_id: str = None,
+        tab_id: Optional[str] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Creates a table and populates it with data in a reliable multi-step process.
@@ -112,7 +112,7 @@ class TableOperationManager:
             return False, f"Table creation failed: {str(e)}", {}
 
     async def _create_empty_table(
-        self, document_id: str, index: int, rows: int, cols: int, tab_id: str = None
+        self, document_id: str, index: int, rows: int, cols: int, tab_id: Optional[str] = None
     ) -> None:
         """Create an empty table at the specified index."""
         logger.debug(f"Creating {rows}x{cols} table at index {index}")
@@ -129,7 +129,7 @@ class TableOperationManager:
         )
 
     async def _get_document_tables(
-        self, document_id: str, tab_id: str = None
+        self, document_id: str, tab_id: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """Get fresh document structure and extract table information."""
         doc = await asyncio.to_thread(
@@ -181,13 +181,15 @@ class TableOperationManager:
                 best_distance = distance
                 best_match = table
 
-        # Sanity check: if the closest table is very far from the target,
-        # something may be wrong. But still return it as best effort.
+        # If the closest table is very far from the target, something is wrong.
+        # Return None so the caller can fail cleanly rather than populate
+        # the wrong table.
         if best_distance > 10:
             logger.warning(
                 f"Closest table to index {target_index} is at {best_match['start_index']} "
                 f"(distance={best_distance}). This may indicate an index mismatch."
             )
+            return None
 
         return best_match
 
@@ -197,7 +199,7 @@ class TableOperationManager:
         table: Dict[str, Any],
         table_data: List[List[str]],
         bold_headers: bool,
-        tab_id: str = None,
+        tab_id: Optional[str] = None,
     ) -> int:
         """
         Populate all table cells in a single batchUpdate call.
@@ -303,8 +305,7 @@ class TableOperationManager:
         document_id: str,
         table_index: int,
         table_data: List[List[str]],
-        clear_existing: bool = False,
-        tab_id: str = None,
+        tab_id: Optional[str] = None,
     ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Populate an existing table with data.
@@ -313,7 +314,6 @@ class TableOperationManager:
             document_id: ID of the document
             table_index: Index of the table to populate (0-based)
             table_data: 2D list of data to insert
-            clear_existing: Whether to clear existing content first
             tab_id: Optional tab ID for targeting a specific tab
 
         Returns:
@@ -321,7 +321,7 @@ class TableOperationManager:
         """
         try:
             tables = await self._get_document_tables(document_id, tab_id)
-            if table_index >= len(tables):
+            if table_index < 0 or table_index >= len(tables):
                 return (
                     False,
                     f"Table index {table_index} not found. Document has {len(tables)} tables",
@@ -369,7 +369,7 @@ class TableOperationManager:
         document_id: str,
         table_info: Dict[str, Any],
         table_data: List[List[str]],
-        tab_id: str = None,
+        tab_id: Optional[str] = None,
     ) -> int:
         """Populate cells in an existing table using a single batch operation."""
         cells = table_info.get("cells", [])
