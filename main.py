@@ -16,6 +16,7 @@ _original_stdout = sys.stdout
 if sys.platform == "darwin":
     sys.stdout = io.StringIO()
 
+
 def _load_startup_dependencies():
     from auth.oauth_config import (
         get_oauth_config,
