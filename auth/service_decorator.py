@@ -220,10 +220,23 @@ def _get_service_account_credentials(
             return google_service_account.Credentials.from_service_account_file(
                 config.service_account_key_file, scopes=scopes, subject=subject
             )
-        info = json.loads(config.service_account_key_json)
+        service_account_key_json = config.service_account_key_json
+        if not isinstance(service_account_key_json, str) or not service_account_key_json.strip():
+            raise GoogleAuthenticationError(
+                "Service account credentials require either service_account_key_file "
+                "or a non-empty service_account_key_json."
+            )
+        try:
+            info = json.loads(service_account_key_json)
+        except json.JSONDecodeError as e:
+            raise GoogleAuthenticationError(
+                "Failed to parse service_account_key_json: invalid JSON."
+            ) from e
         return google_service_account.Credentials.from_service_account_info(
             info, scopes=scopes, subject=subject
         )
+    except GoogleAuthenticationError:
+        raise
     except Exception as e:
         raise GoogleAuthenticationError(
             f"Failed to build service account credentials: {e}"

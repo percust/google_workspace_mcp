@@ -1,4 +1,5 @@
 import inspect
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,6 +117,25 @@ def test_extract_oauth20_user_email_reads_runtime_env(monkeypatch):
     assert kwargs["user_google_email"] == "configured@example.com"
 
 
+def test_get_service_account_credentials_raises_without_key_source(monkeypatch):
+    monkeypatch.setattr(
+        service_decorator,
+        "get_oauth_config",
+        lambda: SimpleNamespace(
+            service_account_key_file=None,
+            service_account_key_json=None,
+        ),
+    )
+
+    with pytest.raises(
+        service_decorator.GoogleAuthenticationError,
+        match="service_account_key_json",
+    ):
+        service_decorator._get_service_account_credentials(
+            ["scope-a"], "configured@example.com"
+        )
+
+
 @pytest.mark.asyncio
 async def test_authenticate_service_account_uses_runtime_configured_user(monkeypatch):
     monkeypatch.setattr(service_decorator, "_ENV_USER_EMAIL", None)
@@ -164,3 +184,27 @@ async def test_authenticate_service_account_uses_runtime_configured_user(monkeyp
         "service_version": "v1",
         "credentials": fake_credentials,
     }
+
+
+@pytest.mark.asyncio
+async def test_authenticate_service_account_raises_without_configured_user(
+    monkeypatch,
+):
+    monkeypatch.setattr(service_decorator, "_ENV_USER_EMAIL", None)
+    monkeypatch.delenv("USER_GOOGLE_EMAIL", raising=False)
+    monkeypatch.setattr(service_decorator, "is_service_account_enabled", lambda: True)
+
+    with pytest.raises(
+        service_decorator.GoogleAuthenticationError,
+        match="Service account mode requires USER_GOOGLE_EMAIL to be configured",
+    ):
+        await service_decorator._authenticate_service(
+            use_oauth21=False,
+            service_name="gmail",
+            service_version="v1",
+            tool_name="sample_tool",
+            user_google_email="caller@example.com",
+            resolved_scopes=["scope-a"],
+            mcp_session_id=None,
+            authenticated_user=None,
+        )
