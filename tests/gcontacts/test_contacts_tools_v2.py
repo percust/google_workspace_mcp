@@ -217,14 +217,13 @@ class TestBuildPersonBodyNew:
         assert body["phoneNumbers"][0] == {"value": "+79270000000", "type": "mobile"}
         assert body["phoneNumbers"][1] == {"value": "+78482123456", "type": "work"}
 
-    def test_phones_with_label(self):
+    def test_phones_label_falls_back_to_type_for_raw_dict(self):
         body = _build_person_body(
-            phones=[phone_input(number="250", type="internal", label="АТС Greenline")]
+            phones=[{"number": "250", "label": "АТС Greenline"}]
         )
         assert body["phoneNumbers"][0] == {
             "value": "250",
-            "type": "internal",
-            "label": "АТС Greenline",
+            "type": "АТС Greenline",
         }
 
     def test_emails_list(self):
@@ -258,17 +257,26 @@ class TestBuildPersonBodyNew:
         )
         assert body["organizations"][0]["department"] == "Engineering"
 
-    def test_organizations_with_description(self):
+    def test_emails_label_falls_back_to_type_for_raw_dict(self):
+        body = _build_person_body(
+            emails=[{"address": "user@example.com", "label": "Personal Inbox"}]
+        )
+        assert body["emailAddresses"][0] == {
+            "value": "user@example.com",
+            "type": "Personal Inbox",
+        }
+
+    def test_organizations_with_job_description(self):
         body = _build_person_body(
             organizations=[
                 organization_input(
                     name="Acme",
                     title="Manager",
-                    description="Primary employer",
+                    jobDescription="Primary employer",
                 )
             ]
         )
-        assert body["organizations"][0]["description"] == "Primary employer"
+        assert body["organizations"][0]["jobDescription"] == "Primary employer"
 
     def test_phones_empty_number_skipped(self):
         body = _build_person_body(
@@ -294,15 +302,17 @@ class TestBuildPersonBodyNew:
         )
         assert body["emailAddresses"][0]["value"] == "user@example.com"
 
-    def test_phones_wins_over_deprecated_phone_without_warning(self):
-        """An explicit new-style list, even empty, wins over the deprecated alias."""
+    def test_phones_wins_over_deprecated_phone_with_ignored_warning(self):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
                 phones=[phone_input(number="+79270000000", type="mobile")],
                 phone="+70000000000",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameter 'phone' ignored because 'phones' was provided"
+            )
         assert len(body["phoneNumbers"]) == 1
         assert body["phoneNumbers"][0]["value"] == "+79270000000"
 
@@ -313,18 +323,23 @@ class TestBuildPersonBodyNew:
                 phones=[],
                 phone="+70000000000",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameter 'phone' ignored because 'phones' was provided"
+            )
         assert body["phoneNumbers"] == []
 
-    def test_emails_wins_over_deprecated_email_without_warning(self):
-        """An explicit new-style email list wins over the deprecated alias."""
+    def test_emails_wins_over_deprecated_email_with_ignored_warning(self):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
                 emails=[email_input(address="new@example.com", type="work")],
                 email="old@example.com",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameter 'email' ignored because 'emails' was provided"
+            )
         assert len(body["emailAddresses"]) == 1
         assert body["emailAddresses"][0]["value"] == "new@example.com"
 
@@ -335,11 +350,13 @@ class TestBuildPersonBodyNew:
                 emails=[],
                 email="old@example.com",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameter 'email' ignored because 'emails' was provided"
+            )
         assert body["emailAddresses"] == []
 
-    def test_organizations_wins_over_deprecated_aliases_without_warning(self):
-        """An explicit organizations list wins over the deprecated aliases."""
+    def test_organizations_wins_over_deprecated_aliases_with_ignored_warning(self):
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             body = _build_person_body(
@@ -347,7 +364,11 @@ class TestBuildPersonBodyNew:
                 organization="OldCorp",
                 job_title="OldTitle",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameters 'organization' and 'job_title' ignored because "
+                "'organizations' was provided"
+            )
         assert len(body["organizations"]) == 1
         assert body["organizations"][0]["name"] == "NewCorp"
 
@@ -359,7 +380,11 @@ class TestBuildPersonBodyNew:
                 organization="OldCorp",
                 job_title="OldTitle",
             )
-            assert not w
+            assert len(w) == 1
+            assert str(w[0].message) == (
+                "Parameters 'organization' and 'job_title' ignored because "
+                "'organizations' was provided"
+            )
         assert body["organizations"] == []
 
     def test_internal_phone_no_type_default_not_added(self):
@@ -482,6 +507,14 @@ class TestMergePhones:
         result = _merge_phones(existing, new, "merge")
         assert len(result) == 1
 
+    def test_merge_deduplicates_when_existing_only_has_canonical_form(self):
+        existing = [
+            {"value": "+7 927 000-00-00", "canonicalForm": "+79270000000", "type": "mobile"}
+        ]
+        new = [{"value": "+79270000000", "type": "mobile"}]
+        result = _merge_phones(existing, new, "merge")
+        assert len(result) == 1
+
     def test_merge_keeps_internal_short_number(self):
         """Short internal numbers dedup by normalized value "250"."""
         existing = [{"value": "250", "type": "internal"}]
@@ -594,6 +627,12 @@ class TestMergeOrganizations:
     def test_merge_preserves_distinct_unnamed_orgs(self):
         existing = [{"title": "CTO"}]
         new = [{"department": "Engineering"}]
+        result = _merge_organizations(existing, new, "merge")
+        assert len(result) == 2
+
+    def test_merge_preserves_orgs_with_same_fields_but_different_type(self):
+        existing = [{"name": "Acme", "title": "CTO", "type": "work"}]
+        new = [{"name": "Acme", "title": "CTO", "type": "school"}]
         result = _merge_organizations(existing, new, "merge")
         assert len(result) == 2
 
@@ -717,10 +756,12 @@ class TestContactsToolSchemaGolden:
         assert phones_items["additionalProperties"] is False
         assert "number" in phones_items["properties"]
         assert "value" in phones_items["properties"]
+        assert "label" not in phones_items["properties"]
         assert emails_items["additionalProperties"] is False
         assert "address" in emails_items["properties"]
+        assert "label" not in emails_items["properties"]
         assert org_items["additionalProperties"] is False
-        assert "description" in org_items["properties"]
+        assert "jobDescription" in org_items["properties"]
 
         batch_contacts_items = manage_batch_defs["ContactInput"]
         batch_updates_items = manage_batch_defs["ContactUpdateInput"]

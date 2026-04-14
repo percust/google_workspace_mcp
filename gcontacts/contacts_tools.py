@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from googleapiclient.errors import HttpError
 from mcp import Resource
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
 from auth.service_decorator import require_google_service
 from core.server import server
@@ -70,10 +70,6 @@ class PhoneInput(BaseModel):
         default=None,
         description="Phone type such as mobile, work, home, or internal.",
     )
-    label: Optional[str] = Field(
-        default=None,
-        description="Optional custom label for the phone number.",
-    )
 
 
 class EmailInput(BaseModel):
@@ -93,10 +89,6 @@ class EmailInput(BaseModel):
         default=None,
         description="Email type such as work, home, or other.",
     )
-    label: Optional[str] = Field(
-        default=None,
-        description="Optional custom label for the email address.",
-    )
 
 
 class OrganizationInput(BaseModel):
@@ -107,9 +99,10 @@ class OrganizationInput(BaseModel):
     name: Optional[str] = Field(default=None, description="Organization name.")
     title: Optional[str] = Field(default=None, description="Job title.")
     department: Optional[str] = Field(default=None, description="Department name.")
-    description: Optional[str] = Field(
+    jobDescription: Optional[str] = Field(
         default=None,
-        description="Optional organization description.",
+        description="Optional organization job description.",
+        validation_alias=AliasChoices("jobDescription", "description"),
     )
     type: Optional[str] = Field(
         default=None,
@@ -146,12 +139,22 @@ class ContactUpdateInput(ContactInput):
 def _coerce_phone_input(phone: Any) -> PhoneInput:
     if isinstance(phone, PhoneInput):
         return phone
+    if isinstance(phone, dict):
+        phone = dict(phone)
+        if not phone.get("type") and phone.get("label"):
+            phone["type"] = phone["label"]
+        phone.pop("label", None)
     return PhoneInput.model_validate(phone)
 
 
 def _coerce_email_input(email: Any) -> EmailInput:
     if isinstance(email, EmailInput):
         return email
+    if isinstance(email, dict):
+        email = dict(email)
+        if not email.get("type") and email.get("label"):
+            email["type"] = email["label"]
+        email.pop("label", None)
     return EmailInput.model_validate(email)
 
 
@@ -356,11 +359,11 @@ def _build_person_body(
     Args:
         given_name: First name.
         family_name: Last name.
-        phones: List of PhoneInput items {number, value?, type?, label?}.
+        phones: List of PhoneInput items {number, value?, type?}.
             Supported types: mobile, work, home, main, workMobile, internal, other, etc.
             Use type="internal" for PBX/ATS short numbers (e.g. 250, 301).
-        emails: List of EmailInput items {address, value?, type?, label?}.
-        organizations: List of OrganizationInput items {name?, title?, department?, description?, type?}.
+        emails: List of EmailInput items {address, value?, type?}.
+        organizations: List of OrganizationInput items {name?, title?, department?, jobDescription?, type?}.
         notes: Additional notes/biography.
         address: Street address.
         email: [DEPRECATED] Single email address. Use emails instead.
@@ -389,6 +392,12 @@ def _build_person_body(
         ]
 
     # --- Emails ---
+    if emails is not None and email is not None:
+        warnings.warn(
+            "Parameter 'email' ignored because 'emails' was provided",
+            DeprecationWarning,
+            stacklevel=3,
+        )
     if emails is None and email is not None:
         warnings.warn(
             "Parameter 'email' is deprecated. Use 'emails=[{\"address\": ..., \"type\": ...}]' instead.",
@@ -403,13 +412,17 @@ def _build_person_body(
             entry: Dict[str, Any] = {"value": e.address or e.value or ""}
             if e.type:
                 entry["type"] = e.type
-            if e.label:
-                entry["label"] = e.label
             if entry["value"]:
                 email_entries.append(entry)
         body["emailAddresses"] = email_entries
 
     # --- Phones ---
+    if phones is not None and phone is not None:
+        warnings.warn(
+            "Parameter 'phone' ignored because 'phones' was provided",
+            DeprecationWarning,
+            stacklevel=3,
+        )
     if phones is None and phone is not None:
         warnings.warn(
             "Parameter 'phone' is deprecated. Use 'phones=[{\"number\": ..., \"type\": ...}]' instead.",
@@ -427,12 +440,25 @@ def _build_person_body(
             entry = {"value": number}
             if p.type:
                 entry["type"] = p.type
-            if p.label:
-                entry["label"] = p.label
             phone_entries.append(entry)
         body["phoneNumbers"] = phone_entries
 
     # --- Organizations ---
+    if organizations is not None and (
+        organization is not None or job_title is not None
+    ):
+        ignored_params = []
+        if organization is not None:
+            ignored_params.append("'organization'")
+        if job_title is not None:
+            ignored_params.append("'job_title'")
+        ignored = " and ".join(ignored_params)
+        parameter_label = "Parameter" if len(ignored_params) == 1 else "Parameters"
+        warnings.warn(
+            f"{parameter_label} {ignored} ignored because 'organizations' was provided",
+            DeprecationWarning,
+            stacklevel=3,
+        )
     if organizations is None and (organization is not None or job_title is not None):
         if organization is not None:
             warnings.warn(
@@ -458,8 +484,8 @@ def _build_person_body(
                 entry["title"] = org.title
             if org.department:
                 entry["department"] = org.department
-            if org.description:
-                entry["description"] = org.description
+            if org.jobDescription:
+                entry["jobDescription"] = org.jobDescription
             if org.type:
                 entry["type"] = org.type
             if entry:
@@ -491,6 +517,9 @@ def _merge_phones(
     Returns:
         Merged phone list.
     """
+    def phone_key(phone: Dict[str, Any]) -> str:
+        return _normalize_phone(phone.get("canonicalForm") or phone.get("value", ""))
+
     if mode == "replace":
         return new_phones
     if mode == "remove":
@@ -506,10 +535,9 @@ def _merge_phones(
     result = list(existing)
     existing_keys = set()
     for p in existing:
-        canonical = p.get("canonicalForm") or _normalize_phone(p.get("value", ""))
-        existing_keys.add(canonical)
+        existing_keys.add(phone_key(p))
     for p in new_phones:
-        canonical = p.get("canonicalForm") or _normalize_phone(p.get("value", ""))
+        canonical = phone_key(p)
         if canonical not in existing_keys:
             result.append(p)
             existing_keys.add(canonical)
@@ -571,10 +599,14 @@ def _merge_organizations(
         Merged org list.
     """
 
-    def organization_key(org: Dict[str, Any]) -> tuple[str, str, str, str]:
-        return tuple(
-            ((org.get(field) or "").strip().lower())
-            for field in ("name", "title", "department", "description")
+    def organization_key(org: Dict[str, Any]) -> tuple[str, str, str, str, str]:
+        job_description = (org.get("jobDescription") or org.get("description") or "")
+        return (
+            ((org.get("name") or "").strip().lower()),
+            ((org.get("title") or "").strip().lower()),
+            ((org.get("department") or "").strip().lower()),
+            job_description.strip().lower(),
+            ((org.get("type") or "").strip().lower()),
         )
 
     if mode == "replace":
@@ -827,12 +859,12 @@ async def manage_contact(
         contact_id (Optional[str]): The contact ID. Required for "update" and "delete" actions.
         given_name (Optional[str]): First name (for create/update).
         family_name (Optional[str]): Last name (for create/update).
-        phones (Optional[List[Dict]]): List of phone dicts {number, type?, label?}.
+        phones (Optional[List[Dict]]): List of phone dicts {number, type?}.
             Supported types: mobile, work, home, main, workMobile, internal, other, etc.
             Use type="internal" for internal PBX/ATS short numbers (e.g. 250, 301) — stored
             as a standalone number without + prefix, displayed as "Internal: 250".
-        emails (Optional[List[Dict]]): List of email dicts {address, type?, label?}.
-        organizations (Optional[List[Dict]]): List of org dicts {name?, title?, department?, type?}.
+        emails (Optional[List[Dict]]): List of email dicts {address, type?}.
+        organizations (Optional[List[Dict]]): List of org dicts {name?, title?, department?, jobDescription?, type?}.
         notes (Optional[str]): Additional notes (for create/update).
         address (Optional[str]): Street address (for create/update).
         phones_mode (str): How to update phones on "update": "merge" (default), "replace", or "remove".

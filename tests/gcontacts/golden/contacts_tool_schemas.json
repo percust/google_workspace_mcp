@@ -17,18 +17,6 @@
             "default": null,
             "description": "Email address value."
           },
-          "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Optional custom label for the email address."
-          },
           "type": {
             "anyOf": [
               {
@@ -72,7 +60,7 @@
             "default": null,
             "description": "Department name."
           },
-          "description": {
+          "jobDescription": {
             "anyOf": [
               {
                 "type": "string"
@@ -82,7 +70,7 @@
               }
             ],
             "default": null,
-            "description": "Optional organization description."
+            "description": "Optional organization job description."
           },
           "name": {
             "anyOf": [
@@ -127,18 +115,6 @@
         "additionalProperties": false,
         "description": "Typed input for a phone entry.",
         "properties": {
-          "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Optional custom label for the phone number."
-          },
           "number": {
             "anyOf": [
               {
@@ -666,18 +642,6 @@
             "default": null,
             "description": "Email address value."
           },
-          "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Optional custom label for the email address."
-          },
           "type": {
             "anyOf": [
               {
@@ -721,7 +685,7 @@
             "default": null,
             "description": "Department name."
           },
-          "description": {
+          "jobDescription": {
             "anyOf": [
               {
                 "type": "string"
@@ -731,7 +695,7 @@
               }
             ],
             "default": null,
-            "description": "Optional organization description."
+            "description": "Optional organization job description."
           },
           "name": {
             "anyOf": [
@@ -776,18 +740,6 @@
         "additionalProperties": false,
         "description": "Typed input for a phone entry.",
         "properties": {
-          "label": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null,
-            "description": "Optional custom label for the phone number."
-          },
           "number": {
             "anyOf": [
               {
