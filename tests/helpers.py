@@ -1,6 +1,7 @@
 """Shared test helpers."""
 
 import io
+import warnings
 
 
 def _make_minimal_pdf(text: str = "Hello World") -> bytes:
@@ -30,8 +31,17 @@ def _make_minimal_pdf(text: str = "Hello World") -> bytes:
     resources = DictionaryObject()
     resources[NameObject("/Font")] = font_res
 
+    add_object = getattr(writer, "add_object", None)
+    if add_object is None:
+        warnings.warn(
+            "PdfWriter.add_object() is unavailable; falling back to private "
+            "PdfWriter._add_object() in test helper.",
+            stacklevel=2,
+        )
+        add_object = writer._add_object
+
     page[NameObject("/Resources")] = resources
-    page[NameObject("/Contents")] = writer._add_object(stream)
+    page[NameObject("/Contents")] = add_object(stream)
 
     buf = io.BytesIO()
     writer.write(buf)

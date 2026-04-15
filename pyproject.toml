@@ -119,6 +119,7 @@ exclude = ["tests*", "docs*", "build", "dist"]
 
 [tool.pytest.ini_options]
 addopts = "--ignore=tests/gappsscript/manual_test.py"
+pythonpath = ["."]
 
 [tool.setuptools.package-data]
 core = ["tool_tiers.yaml"]

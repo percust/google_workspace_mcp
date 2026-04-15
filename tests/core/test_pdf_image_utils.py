@@ -54,6 +54,8 @@ def test_encode_image_content_jpeg():
     raw = b"\xff\xd8\xff" + b"\x00" * 50
     result = encode_image_content(raw, "image/jpeg")
     assert result.startswith("[base64_image:image/jpeg]")
+    encoded_part = result[len("[base64_image:image/jpeg]") :]
+    assert base64.b64decode(encoded_part) == raw
 
 
 # ---------------------------------------------------------------------------

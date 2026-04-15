@@ -170,6 +170,9 @@ async def get_drive_file_content(
     • Native Google Docs, Sheets, Slides → exported as text / CSV.
     • Office files (.docx, .xlsx, .pptx) → unzipped & parsed with std-lib to
       extract readable text.
+    • PDFs → text extracted with pypdf when possible; scanned/image-only PDFs
+      fall back to a download hint.
+    • Images → returned as base64 with MIME metadata for multimodal clients.
     • Any other file → downloaded; tries UTF-8 decode, else notes binary.
 
     Args:

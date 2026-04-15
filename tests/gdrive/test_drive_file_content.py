@@ -2,14 +2,9 @@
 
 import base64
 import io
-
-import pytest
 from unittest.mock import Mock, patch
 
-import sys
-import os
-
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+import pytest
 
 from tests.helpers import _make_minimal_pdf
 from gdrive.drive_tools import get_drive_file_content
