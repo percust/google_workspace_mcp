@@ -20,7 +20,7 @@ Search for files and folders across My Drive and shared drives.
 | Parameter | Type | Required | Default | Notes |
 |-----------|------|----------|---------|-------|
 | user_google_email | string | yes | | |
-| query | string | yes | | Google Drive search query (see operators below) |
+| query | string | yes | | Google Drive search query (see operators below). **WARNING:** Owner-based queries (`'user@example.com' in owners`) do NOT work in Shared Drives - see Shared Drives Limitations below |
 | page_size | integer | no | 10 | Max results to return |
 | page_token | any | no | | Pagination token |
 | drive_id | string | no | | Shared drive ID to scope search |
@@ -28,6 +28,7 @@ Search for files and folders across My Drive and shared drives.
 | corpora | string | no | | `user`, `domain`, `drive`, or `allDrives`. Defaults to `drive` when drive_id is set. Prefer `user` or `drive` over `allDrives` |
 | file_type | string | no | | Friendly name (`folder`, `document`/`doc`, `spreadsheet`/`sheet`, `presentation`/`slides`, `form`, `drawing`, `pdf`, `shortcut`, `script`, `site`, `jam`/`jamboard`) or raw MIME type |
 | detailed | boolean | no | true | Include size, modified time, and link |
+| order_by | string | no | | Sort order (see Sort Order below) |
 
 ### list_drive_items
 List files and folders in a specific folder.
@@ -43,6 +44,7 @@ List files and folders in a specific folder.
 | corpora | string | no | | `user`, `drive`, `allDrives` |
 | file_type | string | no | | Same friendly names as search_drive_files |
 | detailed | boolean | no | true | Include size, modified time, and link |
+| order_by | string | no | | Sort order (see Sort Order below) |
 
 ---
 
@@ -194,6 +196,67 @@ Search for a file by name and check if it has public link sharing enabled.
 ## Drive Search Query Operators
 
 The `query` parameter of `search_drive_files` uses Google Drive query syntax (e.g. `name contains`, `mimeType =`, `'id' in parents`, `modifiedTime >`, `trashed =`, `sharedWithMe`). Combine with `and`/`or`/`not`.
+
+---
+
+## Sort Order
+
+The `order_by` parameter controls result ordering for `search_drive_files` and `list_drive_items`.
+
+**Valid sort keys:**
+- `createdTime` - When the file was created
+- `folder` - Folders first, then files
+- `modifiedByMeTime` - Last time the requesting user modified the file
+- `modifiedTime` - Last time anyone modified the file
+- `name` - File name (case-sensitive)
+- `name_natural` - File name (natural sort order)
+- `quotaBytesUsed` - Storage space used
+- `recency` - Recently used by the user
+- `sharedWithMeTime` - When the file was shared with the user
+- `starred` - Starred files first
+- `viewedByMeTime` - Last time the user viewed the file
+
+**Modifiers:**
+- Add `desc` after a key to sort in descending order (default is ascending)
+- Combine multiple keys with commas: `folder,modifiedTime desc,name`
+
+**Examples:**
+- `modifiedTime desc` - Most recently modified files first
+- `folder,name` - Folders first, then by name within each group
+- `starred desc,modifiedTime desc` - Starred files first, then by modified time
+
+**Limitation:** For users with approximately one million files, the requested sort order may be ignored.
+
+---
+
+## Shared Drives Limitations
+
+**IMPORTANT:** Files in Shared Drives have different ownership models than My Drive files:
+
+**Ownership:**
+- Files in Shared Drives are owned by the **shared drive itself**, not individual users
+- The `owners` and `ownerNames` fields are **NOT populated** for Shared Drive files
+- The `ownedByMe` field is always false
+
+**Query Impact:**
+- Owner-based queries **DO NOT WORK** in Shared Drives:
+  - ❌ `'user@example.com' in owners` - Will not return expected results
+  - ❌ `ownedByMe=true` - Will not find files in Shared Drives
+- To find recent files in Shared Drives, use time-based queries instead:
+  - ✅ `modifiedTime > '2026-01-01T00:00:00'` with `order_by='modifiedTime desc'`
+  - ✅ Search by name, type, or content with `order_by='modifiedTime desc'`
+
+**Other field limitations in Shared Drives:**
+- `permissions` - Not returned directly; use `get_drive_file_permissions` instead
+- `shared` - All items are automatically shared (always true)
+- `folderColorRgb` - Individual folder coloring not supported
+- `writersCanShare` - Cannot restrict sharing by role
+
+**Workaround for finding a user's recent activity:**
+Instead of searching by owner, use:
+1. `order_by='modifiedTime desc'` to get most recent files first
+2. Filter by `modifiedTime > 'YYYY-MM-DDTHH:MM:SS'` to limit to recent files
+3. Manually filter results by checking file activity (if needed)
 
 ---
 

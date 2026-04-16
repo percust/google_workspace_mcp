@@ -71,6 +71,7 @@ async def search_drive_files(
     corpora: Optional[str] = None,
     file_type: Optional[str] = None,
     detailed: bool = True,
+    order_by: Optional[str] = None,
 ) -> str:
     """
     Searches for files and folders within a user's Google Drive, including shared drives.
@@ -78,6 +79,10 @@ async def search_drive_files(
     Args:
         user_google_email (str): The user's Google email address. Required.
         query (str): The search query string. Supports Google Drive search operators.
+                     NOTE: Owner-based queries ('user@example.com' in owners) DO NOT WORK in Shared Drives
+                     because files are owned by the shared drive itself, not individual users.
+                     For recent files by a specific user in Shared Drives, search by modifiedTime
+                     and use order_by='modifiedTime desc' instead.
         page_size (int): The maximum number of files to return. Defaults to 10.
         page_token (Optional[str]): Page token from a previous response's nextPageToken to retrieve the next page of results.
         drive_id (Optional[str]): ID of the shared drive to search. If None, behavior depends on `corpora` and `include_items_from_all_drives`.
@@ -91,6 +96,11 @@ async def search_drive_files(
                                    'script', 'site', 'jam'/'jamboard') or any raw MIME type
                                    string (e.g. 'application/pdf'). Defaults to None (all types).
         detailed (bool): Whether to include size, modified time, and link in results. Defaults to True.
+        order_by (Optional[str]): Sort order. Comma-separated list of sort keys with optional 'desc' modifier.
+                                  Valid keys: 'createdTime', 'folder', 'modifiedByMeTime', 'modifiedTime',
+                                  'name', 'name_natural', 'quotaBytesUsed', 'recency', 'sharedWithMeTime',
+                                  'starred', 'viewedByMeTime'. Example: 'modifiedTime desc' or 'folder,modifiedTime desc,name'.
+                                  Defaults to None (Drive API default ordering).
 
     Returns:
         str: A formatted list of found files/folders with their details (ID, name, type, and optionally size, modified time, link).
@@ -130,6 +140,7 @@ async def search_drive_files(
         corpora=corpora,
         page_token=page_token,
         detailed=detailed,
+        order_by=order_by,
     )
 
     results = await asyncio.to_thread(service.files().list(**list_params).execute)
@@ -469,6 +480,7 @@ async def list_drive_items(
     corpora: Optional[str] = None,
     file_type: Optional[str] = None,
     detailed: bool = True,
+    order_by: Optional[str] = None,
 ) -> str:
     """
     Lists files and folders, supporting shared drives.
@@ -489,6 +501,11 @@ async def list_drive_items(
                                    'script', 'site', 'jam'/'jamboard') or any raw MIME type
                                    string (e.g. 'application/pdf'). Defaults to None (all types).
         detailed (bool): Whether to include size, modified time, and link in results. Defaults to True.
+        order_by (Optional[str]): Sort order. Comma-separated list of sort keys with optional 'desc' modifier.
+                                  Valid keys: 'createdTime', 'folder', 'modifiedByMeTime', 'modifiedTime',
+                                  'name', 'name_natural', 'quotaBytesUsed', 'recency', 'sharedWithMeTime',
+                                  'starred', 'viewedByMeTime'. Example: 'modifiedTime desc' or 'folder,modifiedTime desc,name'.
+                                  Defaults to None (Drive API default ordering).
 
     Returns:
         str: A formatted list of files/folders in the specified folder.
@@ -514,6 +531,7 @@ async def list_drive_items(
         corpora=corpora,
         page_token=page_token,
         detailed=detailed,
+        order_by=order_by,
     )
 
     results = await asyncio.to_thread(service.files().list(**list_params).execute)
