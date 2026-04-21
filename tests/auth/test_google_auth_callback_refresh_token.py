@@ -19,6 +19,9 @@ class _DummyOAuthStore:
     def validate_and_consume_oauth_state(self, state, session_id=None):  # noqa: ARG002
         return {"session_id": session_id, "code_verifier": "verifier"}
 
+    def consume_latest_oauth_state(self):
+        return {"session_id": None, "code_verifier": "verifier"}
+
     def get_credentials_by_mcp_session(self, mcp_session_id):  # noqa: ARG002
         return self._session_credentials
 
@@ -126,3 +129,56 @@ def test_callback_prefers_session_refresh_token_over_credential_store(monkeypatc
     assert credentials.refresh_token == "session-refresh-token"
     assert credential_store.saved_credentials.refresh_token == "session-refresh-token"
     assert oauth_store.stored_refresh_token == "session-refresh-token"
+
+
+def test_callback_retries_without_pkce_when_google_rejects_verifier(monkeypatch):
+    callback_credentials = _make_credentials(refresh_token="fresh-refresh-token")
+    oauth_store = _DummyOAuthStore(session_credentials=None)
+    credential_store = _DummyCredentialStore(existing_credentials=None)
+    create_flow_calls = []
+
+    class _RetryingFlow:
+        def __init__(self, credentials, should_fail):
+            self.credentials = credentials
+            self._should_fail = should_fail
+
+        def fetch_token(self, authorization_response):  # noqa: ARG002
+            if self._should_fail:
+                raise Exception(
+                    "(invalid_grant) code_verifier or verifier is not needed."
+                )
+            return None
+
+    def _fake_create_oauth_flow(**kwargs):
+        create_flow_calls.append(kwargs)
+        should_fail = kwargs.get("code_verifier") == "verifier"
+        return _RetryingFlow(callback_credentials, should_fail=should_fail)
+
+    monkeypatch.setattr("auth.google_auth.create_oauth_flow", _fake_create_oauth_flow)
+    monkeypatch.setattr(
+        "auth.google_auth.get_oauth21_session_store", lambda: oauth_store
+    )
+    monkeypatch.setattr(
+        "auth.google_auth.get_credential_store", lambda: credential_store
+    )
+    monkeypatch.setattr(
+        "auth.google_auth.get_user_info",
+        lambda credentials: {"email": "user@gmail.com"},  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "auth.google_auth.save_credentials_to_session", lambda *args: None
+    )
+    monkeypatch.setattr("auth.google_auth.is_stateless_mode", lambda: False)
+
+    _email, credentials = handle_auth_callback(
+        scopes=["scope.a"],
+        authorization_response="http://localhost/callback?code=code123",
+        redirect_uri="http://localhost/callback",
+        session_id=None,
+    )
+
+    assert credentials.refresh_token == "fresh-refresh-token"
+    assert create_flow_calls[0]["code_verifier"] == "verifier"
+    assert create_flow_calls[0]["autogenerate_code_verifier"] is False
+    assert "code_verifier" not in create_flow_calls[1]
+    assert create_flow_calls[1]["autogenerate_code_verifier"] is False

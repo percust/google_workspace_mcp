@@ -338,6 +338,16 @@ def create_oauth_flow(
     return flow
 
 
+def _is_pkce_verifier_not_needed_error(error: Exception) -> bool:
+    """Detect Google's legacy desktop-client response when PKCE is unnecessary."""
+    message = str(error).lower()
+    return (
+        "invalid_grant" in message
+        and "code_verifier" in message
+        and "not needed" in message
+    )
+
+
 def _determine_oauth_prompt(
     user_google_email: Optional[str],
     required_scopes: List[str],
@@ -651,8 +661,24 @@ def handle_auth_callback(
 
         # Exchange the authorization code for credentials
         # Note: fetch_token will use the redirect_uri configured in the flow
-        flow.fetch_token(authorization_response=authorization_response)
-        credentials = flow.credentials
+        try:
+            flow.fetch_token(authorization_response=authorization_response)
+            credentials = flow.credentials
+        except Exception as exc:
+            if not _is_pkce_verifier_not_needed_error(exc):
+                raise
+
+            logger.warning(
+                "OAuth token exchange rejected PKCE verifier; retrying callback without PKCE."
+            )
+            fallback_flow = create_oauth_flow(
+                scopes=scopes,
+                redirect_uri=redirect_uri,
+                state=state,
+                autogenerate_code_verifier=False,
+            )
+            fallback_flow.fetch_token(authorization_response=authorization_response)
+            credentials = fallback_flow.credentials
         logger.info("Successfully exchanged authorization code for tokens.")
 
         # Handle partial OAuth grants: if the user declined some scopes on
