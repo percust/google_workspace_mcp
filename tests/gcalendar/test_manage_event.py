@@ -12,7 +12,11 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from gcalendar.calendar_tools import _create_event_impl, _modify_event_impl, manage_event
+from gcalendar.calendar_tools import (
+    _create_event_impl,
+    _modify_event_impl,
+    manage_event,
+)
 
 
 def _unwrap(tool):

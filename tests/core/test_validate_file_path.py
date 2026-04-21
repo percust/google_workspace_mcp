@@ -6,9 +6,7 @@ import core.attachment_storage as attachment_storage
 from core.utils import validate_file_path
 
 
-def test_validate_file_path_allows_attachment_storage_by_default(
-    tmp_path, monkeypatch
-):
+def test_validate_file_path_allows_attachment_storage_by_default(tmp_path, monkeypatch):
     monkeypatch.delenv("ALLOWED_FILE_DIRS", raising=False)
     monkeypatch.setattr(attachment_storage, "STORAGE_DIR", tmp_path)
 

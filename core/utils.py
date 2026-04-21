@@ -104,11 +104,11 @@ def _get_allowed_file_dirs() -> list[Path]:
     allowed_dirs: list[Path] = [STORAGE_DIR]
     env_val = os.environ.get(_ALLOWED_FILE_DIRS_ENV)
     if env_val:
-        for raw_path in env_val.split(os.pathsep):
-            stripped_path = raw_path.strip()
-            if not stripped_path:
-                continue
-            allowed_dirs.append(Path(stripped_path).expanduser().resolve())
+        allowed_dirs.extend(
+            Path(p).expanduser().resolve()
+            for p in env_val.split(os.pathsep)
+            if p.strip()
+        )
 
     unique_dirs: list[Path] = []
     seen: set[Path] = set()
