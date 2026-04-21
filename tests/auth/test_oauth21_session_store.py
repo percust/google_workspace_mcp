@@ -55,9 +55,7 @@ def test_consume_latest_oauth_state_filters_by_initiating_session_id(tmp_path):
         code_verifier="verifier-session-1",
     )
 
-    state_info = store_b.consume_latest_oauth_state(
-        initiating_session_id="session-1"
-    )
+    state_info = store_b.consume_latest_oauth_state(initiating_session_id="session-1")
 
     assert state_info is not None
     assert state_info["session_id"] == "session-1"
@@ -71,7 +69,9 @@ def test_consume_latest_oauth_state_filters_by_initiating_session_id(tmp_path):
     assert remaining_state_info["code_verifier"] == "verifier-none"
 
 
-def test_deserialize_oauth_state_entry_normalizes_invalid_and_naive_timestamps(tmp_path):
+def test_deserialize_oauth_state_entry_normalizes_invalid_and_naive_timestamps(
+    tmp_path,
+):
     state_file = tmp_path / "oauth_states.json"
     store = OAuth21SessionStore(oauth_state_file=str(state_file))
 
