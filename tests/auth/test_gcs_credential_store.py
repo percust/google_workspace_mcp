@@ -14,6 +14,7 @@ from google.cloud.exceptions import NotFound, PreconditionFailed
 
 from auth import credential_store as cs_module
 from auth.credential_store import (
+    CredentialStore,
     GCSCredentialStore,
     LocalDirectoryCredentialStore,
     _parse_bool_env,
@@ -117,6 +118,10 @@ class TestRoundTrip:
 
         assert cred_store.delete_credential("nobody@example.com") is True
 
+    def test_list_users_raises_not_implemented(self, cred_store):
+        with pytest.raises(NotImplementedError, match="does not support listing users"):
+            cred_store.list_users()
+
 
 class TestAtomicWrite:
     """Store path must use generation preconditions and fail closed on contention."""
@@ -205,6 +210,13 @@ class TestCMEKVerification:
         store.verify_cmek()
         mock_storage_client.reload.assert_not_called()
 
+    def test_invalid_require_cmek_env_value_raises(
+        self, mock_storage_client, monkeypatch
+    ):
+        monkeypatch.setenv("WORKSPACE_MCP_GCS_REQUIRE_CMEK", "treu")
+        with pytest.raises(ValueError, match="Invalid boolean env var"):
+            GCSCredentialStore(bucket_name="b")
+
 
 class TestConfiguration:
     """Bucket and prefix configuration via arg or env var."""
@@ -221,15 +233,24 @@ class TestConfiguration:
 
     def test_prefix_applied_to_blob_names(self, mock_storage_client):
         store = GCSCredentialStore(bucket_name="b", prefix="creds")
-        assert store._blob_name("a@example.com") == "creds/a@example.com.json"
+        assert (
+            store._blob_name("a@example.com")
+            == f"creds/a@example.com{CredentialStore.FILE_EXTENSION}"
+        )
 
     def test_prefix_trailing_slash_normalised(self, mock_storage_client):
         store = GCSCredentialStore(bucket_name="b", prefix="creds/")
-        assert store._blob_name("a@example.com") == "creds/a@example.com.json"
+        assert (
+            store._blob_name("a@example.com")
+            == f"creds/a@example.com{CredentialStore.FILE_EXTENSION}"
+        )
 
     def test_empty_prefix_produces_flat_names(self, mock_storage_client):
         store = GCSCredentialStore(bucket_name="b", prefix="")
-        assert store._blob_name("a@example.com") == "a@example.com.json"
+        assert (
+            store._blob_name("a@example.com")
+            == f"a@example.com{CredentialStore.FILE_EXTENSION}"
+        )
 
 
 class TestPathSanitisation:
@@ -238,24 +259,27 @@ class TestPathSanitisation:
     def test_traversal_chars_encoded(self, cred_store):
         assert (
             cred_store._blob_name("../../etc/evil@gmail.com")
-            == "..%2F..%2Fetc%2Fevil@gmail.com.json"
+            == f"..%2F..%2Fetc%2Fevil@gmail.com{CredentialStore.FILE_EXTENSION}"
         )
 
     def test_slash_encoded(self, cred_store):
         assert (
             cred_store._blob_name("user/admin@gmail.com")
-            == "user%2Fadmin@gmail.com.json"
+            == f"user%2Fadmin@gmail.com{CredentialStore.FILE_EXTENSION}"
         )
 
     def test_normal_email_unchanged(self, cred_store):
-        assert cred_store._blob_name("alice@example.com") == "alice@example.com.json"
+        assert (
+            cred_store._blob_name("alice@example.com")
+            == f"alice@example.com{CredentialStore.FILE_EXTENSION}"
+        )
 
     def test_plus_sign_prevents_collision(self, cred_store):
         """Verify that user+admin@example.com and user_admin@example.com don't collide."""
         blob1 = cred_store._blob_name("user+admin@example.com")
         blob2 = cred_store._blob_name("user_admin@example.com")
-        assert blob1 == "user%2Badmin@example.com.json"
-        assert blob2 == "user_admin@example.com.json"
+        assert blob1 == f"user%2Badmin@example.com{CredentialStore.FILE_EXTENSION}"
+        assert blob2 == f"user_admin@example.com{CredentialStore.FILE_EXTENSION}"
         assert blob1 != blob2, "Different users must not map to the same blob"
 
 

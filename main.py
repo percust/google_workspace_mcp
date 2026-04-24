@@ -18,7 +18,7 @@ if sys.platform == "darwin":
 
 
 def _load_startup_dependencies():
-    from auth.credential_store import GCSCredentialStore, get_credential_store
+    from auth.credential_store import _selected_backend, get_credential_store
     from auth.oauth_config import (
         get_oauth_config,
         reload_oauth_config,
@@ -36,7 +36,7 @@ def _load_startup_dependencies():
     )
 
     return (
-        GCSCredentialStore,
+        _selected_backend,
         get_credential_store,
         get_oauth_config,
         reload_oauth_config,
@@ -56,7 +56,7 @@ def _load_startup_dependencies():
 
 
 (
-    GCSCredentialStore,
+    _selected_backend,
     get_credential_store,
     get_oauth_config,
     reload_oauth_config,
@@ -574,12 +574,11 @@ def main():
         safe_print(f"🔍 Skipping credentials directory check ({skip_reason})")
         safe_print("")
 
-    backend = (
-        os.getenv("WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND", "").strip().lower()
-        or "local_directory"
-    )
+    backend = _selected_backend()
     if backend == "gcs":
         try:
+            from auth.credential_store import GCSCredentialStore
+
             safe_print("🔍 Verifying GCS credential store configuration...")
             credential_store = get_credential_store()
             if isinstance(credential_store, GCSCredentialStore):

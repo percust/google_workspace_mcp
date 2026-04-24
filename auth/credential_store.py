@@ -13,8 +13,6 @@ from datetime import datetime
 from typing import List, Optional
 from urllib.parse import quote, unquote
 
-from google.cloud import storage
-from google.cloud.exceptions import NotFound, PreconditionFailed
 from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
@@ -22,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 class CredentialStore(ABC):
     """Abstract base class for credential storage."""
+
+    FILE_EXTENSION = ".json"
 
     @abstractmethod
     def get_credential(self, user_email: str) -> Optional[Credentials]:
@@ -134,7 +134,7 @@ class LocalDirectoryCredentialStore(CredentialStore):
             logger.info(f"Created credentials directory: {self.base_dir}")
 
         safe_email = quote(user_email, safe="@._-")
-        creds_path = os.path.join(self.base_dir, f"{safe_email}.json")
+        creds_path = os.path.join(self.base_dir, f"{safe_email}{self.FILE_EXTENSION}")
 
         # Verify resolved path is still under base_dir
         base_resolved = os.path.realpath(str(self.base_dir))
@@ -241,8 +241,10 @@ class LocalDirectoryCredentialStore(CredentialStore):
         non_credential_files = {"oauth_states"}
         try:
             for filename in os.listdir(self.base_dir):
-                if filename.endswith(".json"):
-                    encoded_user_email = filename[:-5]  # Remove .json extension
+                if filename.endswith(self.FILE_EXTENSION):
+                    encoded_user_email = filename[
+                        : -len(self.FILE_EXTENSION)
+                    ]  # Remove extension
                     user_email = unquote(encoded_user_email)
                     if (
                         encoded_user_email in non_credential_files
@@ -289,14 +291,15 @@ class GCSCredentialStore(CredentialStore):
         WORKSPACE_MCP_GCS_REQUIRE_CMEK   — "true"/"1" to enforce CMEK
     """
 
-    FILE_EXTENSION = ".json"
-
     def __init__(
         self,
         bucket_name: Optional[str] = None,
         prefix: Optional[str] = None,
         require_cmek: Optional[bool] = None,
     ):
+        from google.cloud import storage
+        from google.cloud.exceptions import NotFound, PreconditionFailed
+
         bucket_name = bucket_name or os.getenv("WORKSPACE_MCP_GCS_BUCKET")
         if not bucket_name:
             raise ValueError(
@@ -318,6 +321,8 @@ class GCSCredentialStore(CredentialStore):
             )
         self.require_cmek = require_cmek
 
+        self._NotFound = NotFound
+        self._PreconditionFailed = PreconditionFailed
         self._client = storage.Client()
         self._bucket = self._client.bucket(bucket_name)
 
@@ -364,7 +369,7 @@ class GCSCredentialStore(CredentialStore):
         blob = self._bucket.blob(self._blob_name(user_email))
         try:
             raw = blob.download_as_bytes()
-        except NotFound:
+        except self._NotFound:
             logger.debug(f"No credentials object for {user_email}")
             return None
         except Exception as e:
@@ -422,7 +427,7 @@ class GCSCredentialStore(CredentialStore):
             try:
                 blob.reload()
                 generation = blob.generation
-            except NotFound:
+            except self._NotFound:
                 generation = 0  # must-not-exist precondition
 
             blob.upload_from_string(
@@ -432,7 +437,7 @@ class GCSCredentialStore(CredentialStore):
             )
             logger.info(f"Stored credentials for {user_email}")
             return True
-        except PreconditionFailed:
+        except self._PreconditionFailed:
             logger.warning(
                 f"Concurrent write detected for {user_email}; "
                 f"abandoning this write so next refresh can merge current state"
@@ -449,7 +454,7 @@ class GCSCredentialStore(CredentialStore):
             blob.delete()
             logger.info(f"Deleted credentials for {user_email}")
             return True
-        except NotFound:
+        except self._NotFound:
             return True
         except Exception as e:
             logger.error(f"Error deleting credentials for {user_email}: {e}")
@@ -495,7 +500,15 @@ def _parse_bool_env(value: Optional[str]) -> bool:
         return False
     raise ValueError(
         f"Invalid boolean env var value: {value!r}. "
-        f"Expected one of: {sorted(_TRUE_VALUES | _FALSE_VALUES - {''})}"
+        f"Expected one of: {sorted((_TRUE_VALUES | _FALSE_VALUES) - {''})}"
+    )
+
+
+def _selected_backend() -> str:
+    """Return the configured credential store backend."""
+    return (
+        os.getenv("WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND", "").strip().lower()
+        or "local_directory"
     )
 
 
@@ -513,10 +526,7 @@ def get_credential_store() -> CredentialStore:
     global _credential_store
 
     if _credential_store is None:
-        backend = (
-            os.getenv("WORKSPACE_MCP_CREDENTIAL_STORE_BACKEND", "").strip().lower()
-            or "local_directory"
-        )
+        backend = _selected_backend()
         if backend == "gcs":
             # GCS backend does not support list_users(), which is required for
             # single-user mode. Reject unless OAuth 2.1 is enabled.
