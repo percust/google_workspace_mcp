@@ -109,3 +109,26 @@ def test_combined_bold_and_italic_spans():
         for s in styles
     ])
     assert style_types == ["bold", "italic"]
+
+
+def test_unordered_list_emits_bullets():
+    md = "- Item one\n- Item two\n- Item three"
+    requests = markdown_to_docs_requests(md)
+    inserts = [r for r in requests if "insertText" in r]
+    bullets = [r for r in requests if "createParagraphBullets" in r]
+    assert len(inserts) == 3
+    assert inserts[0]["insertText"]["text"] == "Item one\n"
+    assert inserts[1]["insertText"]["text"] == "Item two\n"
+    # One bullet creation request covering all three items
+    assert len(bullets) == 1
+    preset = bullets[0]["createParagraphBullets"]["bulletPreset"]
+    assert preset == "BULLET_DISC_CIRCLE_SQUARE"
+
+
+def test_ordered_list_emits_numbered_preset():
+    md = "1. First\n2. Second\n3. Third"
+    requests = markdown_to_docs_requests(md)
+    bullets = [r for r in requests if "createParagraphBullets" in r]
+    assert len(bullets) == 1
+    preset = bullets[0]["createParagraphBullets"]["bulletPreset"]
+    assert preset == "NUMBERED_DECIMAL_ALPHA_ROMAN"

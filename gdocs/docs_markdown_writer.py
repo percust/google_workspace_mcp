@@ -67,6 +67,56 @@ def _emit_requests(tokens, requests, tab_id, start_index):
             i += 3
             continue
 
+        if tok.type in ("bullet_list_open", "ordered_list_open"):
+            preset = (
+                "BULLET_DISC_CIRCLE_SQUARE"
+                if tok.type == "bullet_list_open"
+                else "NUMBERED_DECIMAL_ALPHA_ROMAN"
+            )
+            list_start = cursor[0]
+            # Find the matching closing token
+            close_type = tok.type.replace("_open", "_close")
+            depth = 1
+            j = i + 1
+            while j < len(tokens) and depth > 0:
+                if tokens[j].type == tok.type:
+                    depth += 1
+                elif tokens[j].type == close_type:
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            # Iterate items between i and j
+            k = i + 1
+            while k < j:
+                item = tokens[k]
+                if item.type == "list_item_open":
+                    # Inner structure typically - list_item_open, paragraph_open, inline, paragraph_close, list_item_close
+                    # Find the inline token within this list_item
+                    if k + 2 < j and tokens[k + 2].type == "inline":
+                        inline_tok = tokens[k + 2]
+                        text, inline_styles = _render_inline_with_styles(
+                            inline_tok.children or [], cursor[0], tab_id
+                        )
+                        text += "\n"
+                        requests.append(_build_insert_text(cursor[0], text, tab_id))
+                        cursor[0] += len(text)
+                        requests.extend(inline_styles)
+                k += 1
+            list_end = cursor[0]
+            # One createParagraphBullets covering the full list range
+            rng = {"startIndex": list_start, "endIndex": list_end}
+            if tab_id:
+                rng["tabId"] = tab_id
+            requests.append({
+                "createParagraphBullets": {
+                    "range": rng,
+                    "bulletPreset": preset,
+                }
+            })
+            i = j + 1
+            continue
+
         if tok.type == "paragraph_open":
             # paragraph_open is followed by inline (children), then paragraph_close
             inline_tok = tokens[i + 1]
