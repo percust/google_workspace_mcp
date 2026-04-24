@@ -1,5 +1,3 @@
-import pytest
-
 from auth.google_auth import get_credentials
 
 
