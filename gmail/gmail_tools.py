@@ -695,6 +695,10 @@ async def _fetch_thread_reply_context(
 
     message_contexts = []
     for msg in messages:
+        # Skip trashed messages so auto-derived In-Reply-To never points at a
+        # message that Gmail's UI cannot render
+        if "TRASH" in msg.get("labelIds", []):
+            continue
         payload = msg.get("payload", {})
         headers = _extract_headers(payload, header_names)
         context = {
