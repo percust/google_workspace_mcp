@@ -39,9 +39,11 @@ class _CredentialStore:
     def __init__(self, existing_credentials=None, store_result=True):
         self._existing_credentials = existing_credentials
         self.store_result = store_result
+        self.get_calls = []
         self.store_calls = []
 
-    def get_credential(self, user_email):  # noqa: ARG002
+    def get_credential(self, user_email):
+        self.get_calls.append(user_email)
         return self._existing_credentials
 
     def store_credential(self, user_email, credentials):  # noqa: ARG002
@@ -115,3 +117,31 @@ def test_get_credentials_skips_session_update_when_refresh_persist_fails(monkeyp
     assert oauth_store.store_calls == []
     assert len(session_cache_writes) == 1
     assert session_cache_writes[0][0] == "session-1"
+
+
+def test_get_credentials_single_user_returns_none_for_missing_requested_user(
+    monkeypatch,
+):
+    credential_store = _CredentialStore(existing_credentials=None)
+    fallback_creds = _RefreshableCredentials()
+    fallback_calls = []
+
+    def _unexpected_fallback(credentials_base_dir):  # noqa: ARG001
+        fallback_calls.append(True)
+        return fallback_creds, "other@example.com"
+
+    monkeypatch.setenv("MCP_SINGLE_USER_MODE", "1")
+    monkeypatch.setattr(
+        "auth.google_auth.get_credential_store", lambda: credential_store
+    )
+    monkeypatch.setattr("auth.google_auth._find_any_credentials", _unexpected_fallback)
+
+    result = get_credentials(
+        user_google_email="missing@example.com",
+        required_scopes=["scope.a"],
+    )
+
+    assert result is None
+    assert credential_store.get_calls == ["missing@example.com"]
+    assert credential_store.store_calls == []
+    assert fallback_calls == []

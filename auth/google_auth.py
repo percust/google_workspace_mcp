@@ -824,7 +824,9 @@ def get_credentials(
     """
     Retrieves stored credentials, prioritizing OAuth 2.1 store, then session, then file. Refreshes if necessary.
     If credentials are loaded from file and a session_id is present, they are cached in the session.
-    In single-user mode, bypasses session mapping and uses any available credentials.
+    In single-user mode, bypasses session mapping. If user_google_email is provided, only credentials
+    for that email are used and the function returns None instead of falling back to any available
+    credentials. If user_google_email is not provided, any available credentials may be used.
 
     Args:
         user_google_email: Optional user's Google email.
@@ -947,11 +949,10 @@ def get_credentials(
                 found_user_email = user_google_email
             else:
                 logger.info(
-                    f"[get_credentials] Single-user mode: no credentials for {user_google_email}, falling back to any"
+                    "[get_credentials] Single-user mode: no credentials for requested "
+                    f"user {user_google_email}; not falling back to another user"
                 )
-                credentials, found_user_email = _find_any_credentials(
-                    credentials_base_dir
-                )
+                return None
         else:
             credentials, found_user_email = _find_any_credentials(credentials_base_dir)
         if not credentials:
