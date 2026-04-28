@@ -2495,7 +2495,9 @@ async def upload_drive_file(
     )
     logger.info(f"[upload_drive_file] Done. Link: {link}")
     return confirmation
-    # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
 # Streaming uploads (two-step: create_upload_slot + commit_upload + a
 # `PUT /upload/{token}` HTTP route). Imported here so that registration
 # happens whenever the `drive` tool module is loaded by main.py.
