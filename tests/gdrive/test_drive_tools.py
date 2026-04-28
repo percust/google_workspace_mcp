@@ -1104,3 +1104,301 @@ def test_resolve_file_type_mime_empty_raises():
 
     with pytest.raises(ValueError, match="cannot be empty"):
         resolve_file_type_mime("   ")
+
+
+# ---------------------------------------------------------------------------
+# upload_drive_file
+# ---------------------------------------------------------------------------
+
+
+def _make_drive_create_mock(response: dict) -> Mock:
+    """Build a mock service whose files().create().execute() returns response."""
+    mock_service = Mock()
+    mock_request = Mock()
+    mock_request.execute.return_value = response
+    mock_service.files.return_value.create.return_value = mock_request
+    return mock_service
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_basic_xlsx():
+    """Standard base64 xlsx upload preserves source MIME and reports size."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"PK\x03\x04 fake-xlsx-bytes"
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    mock_service = _make_drive_create_mock({
+        "id": "file_xlsx_1",
+        "name": "report.xlsx",
+        "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "webViewLink": "https://drive.google.com/file/d/file_xlsx_1/view",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="root",
+    ):
+        result = await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="report.xlsx",
+            content_base64=b64,
+            folder_id="root",
+            mime_type=None,
+            convert_to_google_format=False,
+        )
+
+    # Inspect what was passed to the API
+    create_call = mock_service.files.return_value.create.call_args
+    body = create_call.kwargs["body"]
+    assert body["name"] == "report.xlsx"
+    assert body["parents"] == ["root"]
+    # MIME inferred from .xlsx extension, no conversion
+    assert body["mimeType"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert create_call.kwargs["supportsAllDrives"] is True
+
+    assert "Successfully uploaded" in result
+    assert "file_xlsx_1" in result
+    assert f"{len(payload)} bytes" in result
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_converts_xlsx_to_sheets():
+    """convert_to_google_format=True remaps xlsx MIME to Google Sheets in metadata."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"PK\x03\x04 fake-xlsx"
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    mock_service = _make_drive_create_mock({
+        "id": "sheet_1",
+        "name": "report",
+        "mimeType": "application/vnd.google-apps.spreadsheet",
+        "webViewLink": "https://docs.google.com/spreadsheets/d/sheet_1/edit",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="0AJdQD--8bjkkUk9PVA",
+    ):
+        result = await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="report.xlsx",
+            content_base64=b64,
+            folder_id="0AJdQD--8bjkkUk9PVA",
+            mime_type=None,
+            convert_to_google_format=True,
+        )
+
+    body = mock_service.files.return_value.create.call_args.kwargs["body"]
+    # Target MIME swapped to native Google Sheets
+    assert body["mimeType"] == "application/vnd.google-apps.spreadsheet"
+    # Parent is the resolved shared drive folder
+    assert body["parents"] == ["0AJdQD--8bjkkUk9PVA"]
+    assert "sheet_1" in result
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_conversion_unsupported_falls_through():
+    """Unsupported source MIME with convert flag set: upload as-is + note in result."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"\x89PNG\r\n\x1a\n fake-png"
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    mock_service = _make_drive_create_mock({
+        "id": "img_1",
+        "name": "screenshot.png",
+        "mimeType": "image/png",
+        "webViewLink": "https://drive.google.com/file/d/img_1/view",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="root",
+    ):
+        result = await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="screenshot.png",
+            content_base64=b64,
+            folder_id="root",
+            mime_type=None,
+            convert_to_google_format=True,
+        )
+
+    body = mock_service.files.return_value.create.call_args.kwargs["body"]
+    # PNG has no native Google equivalent — stays image/png
+    assert body["mimeType"] == "image/png"
+    assert "no native Google equivalent" in result
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_explicit_mime_overrides_extension():
+    """Explicit mime_type wins over extension-based inference."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"hello"
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    mock_service = _make_drive_create_mock({
+        "id": "f1",
+        "name": "weird_name",
+        "mimeType": "application/pdf",
+        "webViewLink": "https://drive.google.com/file/d/f1/view",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="root",
+    ):
+        await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="weird_name",  # no extension
+            content_base64=b64,
+            folder_id="root",
+            mime_type="application/pdf",
+            convert_to_google_format=False,
+        )
+
+    body = mock_service.files.return_value.create.call_args.kwargs["body"]
+    assert body["mimeType"] == "application/pdf"
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_unknown_extension_falls_back_to_octet_stream():
+    """Unknown extension and no explicit MIME → application/octet-stream."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"raw-bytes"
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    mock_service = _make_drive_create_mock({
+        "id": "f1",
+        "name": "blob.xyz",
+        "mimeType": "application/octet-stream",
+        "webViewLink": "https://drive.google.com/file/d/f1/view",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="root",
+    ):
+        await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="blob.xyz",
+            content_base64=b64,
+            folder_id="root",
+            mime_type=None,
+            convert_to_google_format=False,
+        )
+
+    body = mock_service.files.return_value.create.call_args.kwargs["body"]
+    assert body["mimeType"] == "application/octet-stream"
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_rejects_empty_base64():
+    """Empty content_base64 raises with a clear message."""
+    from gdrive.drive_tools import upload_drive_file
+
+    fn = _unwrap(upload_drive_file)
+    with pytest.raises(Exception, match="must not be empty"):
+        await fn(
+            service=Mock(),
+            user_google_email="user@example.com",
+            file_name="x.txt",
+            content_base64="",
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_rejects_invalid_base64():
+    """Non-base64 garbage raises a decoding error."""
+    from gdrive.drive_tools import upload_drive_file
+
+    fn = _unwrap(upload_drive_file)
+    with pytest.raises(Exception, match="Failed to decode"):
+        await fn(
+            service=Mock(),
+            user_google_email="user@example.com",
+            file_name="x.txt",
+            content_base64="!!!not base64@@@",
+        )
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_tolerates_missing_padding_and_whitespace():
+    """Whitespace/newlines and missing '=' padding are tolerated."""
+    import base64
+    from gdrive.drive_tools import upload_drive_file
+
+    payload = b"abc"  # encodes to 'YWJj' (no padding) → after wrap, normalize
+    b64 = base64.b64encode(payload).decode("ascii").rstrip("=")
+    # Inject whitespace and a newline
+    b64_messy = b64[:2] + " \n" + b64[2:]
+
+    mock_service = _make_drive_create_mock({
+        "id": "f1",
+        "name": "x.txt",
+        "mimeType": "text/plain",
+        "webViewLink": "https://drive.google.com/file/d/f1/view",
+    })
+
+    fn = _unwrap(upload_drive_file)
+    with patch(
+        "gdrive.drive_tools.resolve_folder_id",
+        new_callable=AsyncMock,
+        return_value="root",
+    ):
+        result = await fn(
+            service=mock_service,
+            user_google_email="user@example.com",
+            file_name="x.txt",
+            content_base64=b64_messy,
+        )
+
+    assert "Successfully uploaded" in result
+    assert f"{len(payload)} bytes" in result
+
+
+@pytest.mark.asyncio
+async def test_upload_drive_file_rejects_oversize_payload():
+    """Payload above the configured limit is rejected before upload."""
+    import base64
+    from gdrive import drive_tools as dt
+
+    # Tiny limit so the test is fast. Patch the module constant.
+    payload = b"x" * 1024
+    b64 = base64.b64encode(payload).decode("ascii")
+
+    fn = _unwrap(dt.upload_drive_file)
+    with patch.object(dt, "UPLOAD_DRIVE_FILE_MAX_BYTES", 100):
+        with pytest.raises(Exception, match="exceeds"):
+            await fn(
+                service=Mock(),
+                user_google_email="user@example.com",
+                file_name="big.bin",
+                content_base64=b64,
+            )

@@ -2233,3 +2233,265 @@ async def set_drive_file_permissions(
     output_parts.extend(["", f"View link: {file_metadata.get('webViewLink', 'N/A')}"])
 
     return "\n".join(output_parts)
+
+
+# ---------------------------------------------------------------------------
+# upload_drive_file — binary upload from base64-encoded content
+# ---------------------------------------------------------------------------
+
+# Source MIME types that Google Drive can convert to native Google formats
+# when uploaded with a target Google MIME type in metadata.
+GOOGLE_NATIVE_CONVERT_MAP = {
+    # Spreadsheets
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        "application/vnd.google-apps.spreadsheet",
+    "application/vnd.ms-excel":
+        "application/vnd.google-apps.spreadsheet",
+    "application/vnd.oasis.opendocument.spreadsheet":
+        "application/vnd.google-apps.spreadsheet",
+    "text/csv":
+        "application/vnd.google-apps.spreadsheet",
+    "text/tab-separated-values":
+        "application/vnd.google-apps.spreadsheet",
+    # Documents
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        "application/vnd.google-apps.document",
+    "application/msword":
+        "application/vnd.google-apps.document",
+    "application/vnd.oasis.opendocument.text":
+        "application/vnd.google-apps.document",
+    "application/rtf":
+        "application/vnd.google-apps.document",
+    "text/rtf":
+        "application/vnd.google-apps.document",
+    "text/plain":
+        "application/vnd.google-apps.document",
+    "text/html":
+        "application/vnd.google-apps.document",
+    "text/markdown":
+        "application/vnd.google-apps.document",
+    # Presentations
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        "application/vnd.google-apps.presentation",
+    "application/vnd.ms-powerpoint":
+        "application/vnd.google-apps.presentation",
+    "application/vnd.oasis.opendocument.presentation":
+        "application/vnd.google-apps.presentation",
+}
+
+# Map file extensions to source MIME types when caller does not provide one.
+EXTENSION_MIME_MAP = {
+    # Spreadsheets
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".ods": "application/vnd.oasis.opendocument.spreadsheet",
+    ".csv": "text/csv",
+    ".tsv": "text/tab-separated-values",
+    # Documents
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".doc": "application/msword",
+    ".odt": "application/vnd.oasis.opendocument.text",
+    ".rtf": "application/rtf",
+    ".txt": "text/plain",
+    ".html": "text/html",
+    ".htm": "text/html",
+    ".md": "text/markdown",
+    ".markdown": "text/markdown",
+    # Presentations
+    ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    ".ppt": "application/vnd.ms-powerpoint",
+    ".odp": "application/vnd.oasis.opendocument.presentation",
+    # PDF
+    ".pdf": "application/pdf",
+    # Images
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".svg": "image/svg+xml",
+    ".bmp": "image/bmp",
+    ".tiff": "image/tiff",
+    ".tif": "image/tiff",
+    # Archives
+    ".zip": "application/zip",
+    ".tar": "application/x-tar",
+    ".gz": "application/gzip",
+    # Audio / video (basic)
+    ".mp3": "audio/mpeg",
+    ".wav": "audio/wav",
+    ".mp4": "video/mp4",
+    ".webm": "video/webm",
+    # JSON / XML
+    ".json": "application/json",
+    ".xml": "application/xml",
+}
+
+# Maximum decoded payload size for a single upload via this tool.
+# 50 MiB covers virtually all office documents, exports, and screenshots
+# while keeping memory pressure on the MCP server bounded.
+UPLOAD_DRIVE_FILE_MAX_BYTES = 50 * 1024 * 1024
+
+
+def _resolve_source_mime_type(
+    file_name: str, mime_type: Optional[str]
+) -> str:
+    """Return an explicit source MIME type for the upload.
+
+    Precedence: explicit mime_type > extension lookup > generic octet-stream.
+    """
+    if mime_type:
+        return mime_type
+    suffix = Path(file_name).suffix.lower()
+    if suffix and suffix in EXTENSION_MIME_MAP:
+        return EXTENSION_MIME_MAP[suffix]
+    return "application/octet-stream"
+
+
+@server.tool()
+@handle_http_errors("upload_drive_file", service_type="drive")
+@require_google_service("drive", "drive_file")
+async def upload_drive_file(
+    service,
+    user_google_email: str,
+    file_name: str,
+    content_base64: str,
+    folder_id: str = "root",
+    mime_type: Optional[str] = None,
+    convert_to_google_format: bool = False,
+) -> str:
+    """
+    Uploads a binary file to Google Drive from base64-encoded content.
+
+    Designed for cases where the calling MCP client only has the file in
+    memory or in its sandboxed filesystem (i.e. the server cannot resolve
+    a `file://` URL, and the file is not exposed via http(s)). The client
+    base64-encodes the file bytes and sends them inline.
+
+    Works with shared drives via supportsAllDrives=True.
+
+    Args:
+        user_google_email (str): The user's Google email address. Required.
+        file_name (str): The name (with extension) for the new file in Drive.
+        content_base64 (str): The file content, base64-encoded (standard or
+            urlsafe alphabet, padding optional). Decoded payload size must
+            not exceed 50 MiB.
+        folder_id (str): Parent folder ID. Defaults to 'root' (My Drive of
+            the calling user). For shared drives, pass a folder ID inside
+            the shared drive.
+        mime_type (Optional[str]): MIME type of the source file. If omitted,
+            it is inferred from the file extension; falls back to
+            application/octet-stream.
+        convert_to_google_format (bool): When True, asks Drive to convert
+            the upload into the matching native Google format on the fly:
+              * Excel / CSV / ODS  -> Google Sheets
+              * Word / RTF / TXT / ODT / HTML / Markdown -> Google Docs
+              * PowerPoint / ODP   -> Google Slides
+            Conversion is only attempted when the source MIME is in the
+            supported set; otherwise the file is uploaded as-is and a note
+            is added to the response.
+
+    Returns:
+        str: Confirmation including file ID, final MIME type, byte size,
+        and webViewLink.
+    """
+    logger.info(
+        f"[upload_drive_file] Invoked. Email: '{user_google_email}', "
+        f"File Name: {file_name}, Folder ID: {folder_id}, "
+        f"convert_to_google_format: {convert_to_google_format}"
+    )
+
+    if not content_base64:
+        raise Exception("'content_base64' must not be empty.")
+
+    # Decode base64 — accept both standard and urlsafe variants, tolerate
+    # missing padding which is common when content is hand-assembled.
+    try:
+        # Strip whitespace/newlines that some clients introduce.
+        cleaned = "".join(content_base64.split())
+        # Pad to a multiple of 4.
+        missing_padding = (-len(cleaned)) % 4
+        if missing_padding:
+            cleaned += "=" * missing_padding
+        try:
+            file_bytes = base64.b64decode(cleaned, validate=True)
+        except (ValueError, base64.binascii.Error):
+            file_bytes = base64.urlsafe_b64decode(cleaned)
+    except Exception as exc:
+        raise Exception(f"Failed to decode 'content_base64': {exc}")
+
+    decoded_size = len(file_bytes)
+    if decoded_size == 0:
+        raise Exception("Decoded payload is empty.")
+    if decoded_size > UPLOAD_DRIVE_FILE_MAX_BYTES:
+        raise Exception(
+            f"Decoded payload size {decoded_size} bytes exceeds the "
+            f"{UPLOAD_DRIVE_FILE_MAX_BYTES} byte limit "
+            f"({UPLOAD_DRIVE_FILE_MAX_BYTES // (1024 * 1024)} MiB) for "
+            f"upload_drive_file. For larger files, host the file at an "
+            f"https:// URL and call create_drive_file with fileUrl."
+        )
+
+    source_mime = _resolve_source_mime_type(file_name, mime_type)
+    logger.info(
+        f"[upload_drive_file] Decoded {decoded_size} bytes. "
+        f"Source MIME: {source_mime}"
+    )
+
+    resolved_folder_id = await resolve_folder_id(service, folder_id)
+
+    target_mime = source_mime
+    conversion_note = ""
+    if convert_to_google_format:
+        mapped = GOOGLE_NATIVE_CONVERT_MAP.get(source_mime)
+        if mapped:
+            target_mime = mapped
+            logger.info(
+                f"[upload_drive_file] Will convert to Google native format: "
+                f"{source_mime} -> {target_mime}"
+            )
+        else:
+            conversion_note = (
+                f" Note: convert_to_google_format=True was requested but "
+                f"source MIME '{source_mime}' has no native Google "
+                f"equivalent; file uploaded as-is."
+            )
+            logger.info(
+                f"[upload_drive_file] No native conversion target for "
+                f"{source_mime}; uploading as-is."
+            )
+
+    file_metadata = {
+        "name": file_name,
+        "parents": [resolved_folder_id],
+        "mimeType": target_mime,
+    }
+
+    media = MediaIoBaseUpload(
+        io.BytesIO(file_bytes),
+        mimetype=source_mime,
+        resumable=True,
+        chunksize=UPLOAD_CHUNK_SIZE_BYTES,
+    )
+
+    created_file = await asyncio.to_thread(
+        service.files()
+        .create(
+            body=file_metadata,
+            media_body=media,
+            fields="id, name, mimeType, webViewLink",
+            supportsAllDrives=True,
+        )
+        .execute
+    )
+
+    link = created_file.get("webViewLink", "No link available")
+    final_mime = created_file.get("mimeType", target_mime)
+    confirmation = (
+        f"Successfully uploaded file '{created_file.get('name', file_name)}' "
+        f"(ID: {created_file.get('id', 'N/A')}, MIME: {final_mime}, "
+        f"size: {decoded_size} bytes) to folder '{folder_id}' for "
+        f"{user_google_email}.{conversion_note} Link: {link}"
+    )
+    logger.info(f"[upload_drive_file] Done. Link: {link}")
+    return confirmation
