@@ -300,15 +300,22 @@ async def create_upload_slot(service, user_google_email: str) -> str:
     Allocate a one-shot URL for streaming a file into Google Drive without
     embedding its bytes in the MCP message stream.
 
-    Use this for any binary file (xlsx, pdf, png, zip, etc.) where you have
-    direct filesystem access on the calling client and want to avoid the
-    base64 path of `upload_drive_file`. Three-step workflow:
+    Use this for any binary file (xlsx, pdf, png, zip, etc.) — this is the
+    ONLY supported path for uploading bytes to Drive on this server. The
+    content / base64 paths (create_drive_file, upload_drive_file) have been
+    removed in phase 2.4. Three-step workflow:
 
       1. Call `create_upload_slot` — receive `token` and `upload_url`.
-      2. PUT the raw file bytes to `upload_url` (e.g. `curl -T file URL`
-         or any HTTP client supporting streaming PUT).
+      2. PUT the raw file bytes to `upload_url`
+         (e.g. `curl -X PUT --data-binary @file URL` or any HTTP client
+         supporting streaming PUT).
       3. Call `commit_upload(token, file_name, folder_id, ...)` to move the
          bytes into Drive. The slot is then invalidated.
+
+    For staged cross-system transfer (e.g. Claude sandbox <-> VPS without
+    routing through Drive at all), use the parallel /stage/* endpoints on
+    the same host:
+      POST /stage/new -> PUT /stage/<token>/upload -> GET /stage/<token>
 
     The slot is bound to the calling Google account: only the same
     `user_google_email` may later call `commit_upload` for this token.

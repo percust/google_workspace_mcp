@@ -687,7 +687,7 @@ async def create_drive_folder(
     )
 
 
-@server.tool()
+# @server.tool()  # DISABLED phase 2.4 — content/fileUrl path forbidden; use create_upload_slot+PUT or /stage/*
 @handle_http_errors("create_drive_file", service_type="drive")
 @require_google_service("drive", "drive_file")
 async def create_drive_file(
@@ -2348,7 +2348,7 @@ def _resolve_source_mime_type(
     return "application/octet-stream"
 
 
-@server.tool()
+# @server.tool()  # DISABLED phase 2.4 — base64 path forbidden; use create_upload_slot+PUT or /stage/*
 @handle_http_errors("upload_drive_file", service_type="drive")
 @require_google_service("drive", "drive_file")
 async def upload_drive_file(

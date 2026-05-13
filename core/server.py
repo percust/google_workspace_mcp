@@ -145,13 +145,33 @@ class SecureFastMCP(FastMCP):
         return await super().call_tool(name, arguments, *args, **kwargs)
 
 
-# Build server instructions with user email context for single-user mode
-_server_instructions = None
-if USER_GOOGLE_EMAIL:
-    _server_instructions = f"""Connected Google account: {USER_GOOGLE_EMAIL}
+# Build server instructions: file-upload policy (always) + single-user email hint (when applicable).
+# Phase 2.4: the streaming-only policy block below is mandatory and always sent to clients
+# during MCP handshake, so the rule about avoiding content/base64 paths is visible to any
+# connected agent regardless of single-user vs multi-user mode.
+_streaming_policy = (
+    "File upload policy (workspace-mcp phase 2.4):\n"
+    "- Embedding file bytes in tool arguments is forbidden on this server.\n"
+    "- Tools create_drive_file(content/fileUrl) and upload_drive_file(content_base64) "
+    "have been removed.\n"
+    "- To upload to Drive: call create_upload_slot -> receive upload_url -> "
+    "PUT raw bytes via curl/HTTP client -> call commit_upload(token, file_name, folder_id).\n"
+    "- For staged transfer between systems (e.g. sandbox <-> VPS without routing through "
+    "Drive), use https://gws.percust.com/stage/new and the parallel /stage/<token> endpoints.\n"
+    "- Never base64-encode file content into tool arguments. Always stream bytes via HTTP."
+)
 
-When using Google Workspace tools, always use `{USER_GOOGLE_EMAIL}` as the `user_google_email` parameter. Do not ask the user for their email address."""
+if USER_GOOGLE_EMAIL:
+    _server_instructions = (
+        f"Connected Google account: {USER_GOOGLE_EMAIL}\n\n"
+        f"When using Google Workspace tools, always use `{USER_GOOGLE_EMAIL}` as the "
+        f"`user_google_email` parameter. Do not ask the user for their email address.\n\n"
+        f"{_streaming_policy}"
+    )
     logger.info(f"Server instructions configured for user: {USER_GOOGLE_EMAIL}")
+else:
+    _server_instructions = _streaming_policy
+    logger.info("Server instructions: streaming-only upload policy")
 
 server = SecureFastMCP(
     name="google_workspace",
