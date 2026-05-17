@@ -92,6 +92,20 @@ sheets:
     - list_spreadsheet_comments
     - manage_spreadsheet_comment
     - manage_conditional_formatting
+    - merge_sheet_range
+    - unmerge_sheet_range
+    - set_range_borders
+    - set_data_validation
+    - find_replace_sheet
+    - sort_range
+    - manage_named_range
+    - manage_protected_range
+    - manage_dimension_group
+    - manage_filter_view
+    - clear_range_formatting
+    - manage_chart
+    - copy_paste_range
+    - insert_cells_with_shift
 
 chat:
   core:
