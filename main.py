@@ -350,7 +350,7 @@ def main():
         "drive": lambda: import_module("gdrive.drive_tools"),
         "calendar": lambda: import_module("gcalendar.calendar_tools"),
         "docs": lambda: import_module("gdocs.docs_tools"),
-        "sheets": lambda: import_module("gsheets.sheets_tools"),
+        "sheets": lambda: (import_module("gsheets.sheets_tools"), import_module("gsheets.sheets_tools_ext"))[0],
         "chat": lambda: import_module("gchat.chat_tools"),
         "forms": lambda: import_module("gforms.forms_tools"),
         "slides": lambda: import_module("gslides.slides_tools"),

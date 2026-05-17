@@ -144,6 +144,7 @@ import gdrive.drive_tools
 import gcalendar.calendar_tools
 import gdocs.docs_tools
 import gsheets.sheets_tools
+import gsheets.sheets_tools_ext
 import gchat.chat_tools
 import gforms.forms_tools
 import gslides.slides_tools

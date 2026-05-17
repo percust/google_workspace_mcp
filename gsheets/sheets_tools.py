@@ -428,6 +428,10 @@ async def _format_sheet_range_impl(
     bold: Optional[bool] = None,
     italic: Optional[bool] = None,
     font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
+    strikethrough: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    text_rotation: Optional[int] = None,
 ) -> str:
     """Internal implementation for format_sheet_range.
 
@@ -571,9 +575,27 @@ async def _format_sheet_range_impl(
         text_format["fontSize"] = font_size
         text_format_fields.append("userEnteredFormat.textFormat.fontSize")
 
+    if font_family is not None:
+        text_format["fontFamily"] = font_family
+        text_format_fields.append("userEnteredFormat.textFormat.fontFamily")
+
+    if strikethrough is not None:
+        text_format["strikethrough"] = strikethrough
+        text_format_fields.append("userEnteredFormat.textFormat.strikethrough")
+
+    if underline is not None:
+        text_format["underline"] = underline
+        text_format_fields.append("userEnteredFormat.textFormat.underline")
+
     if text_format:
         user_entered_format["textFormat"] = text_format
         fields.extend(text_format_fields)
+
+    if text_rotation is not None:
+        if not isinstance(text_rotation, int) or text_rotation < -90 or text_rotation > 90:
+            raise UserInputError("text_rotation must be an integer between -90 and 90.")
+        user_entered_format["textRotation"] = {"angle": text_rotation}
+        fields.append("userEnteredFormat.textRotation")
 
     # Number format
     if number_format:
@@ -642,6 +664,14 @@ async def _format_sheet_range_impl(
         applied_parts.append("italic" if italic else "not italic")
     if font_size is not None:
         applied_parts.append(f"font size {font_size}")
+    if font_family is not None:
+        applied_parts.append(f"font {font_family}")
+    if strikethrough is not None:
+        applied_parts.append("strikethrough" if strikethrough else "no strikethrough")
+    if underline is not None:
+        applied_parts.append("underline" if underline else "no underline")
+    if text_rotation is not None:
+        applied_parts.append(f"rotation {text_rotation}deg")
 
     summary = ", ".join(applied_parts)
 
@@ -671,6 +701,10 @@ async def format_sheet_range(
     bold: Optional[bool] = None,
     italic: Optional[bool] = None,
     font_size: Optional[int] = None,
+    font_family: Optional[str] = None,
+    strikethrough: Optional[bool] = None,
+    underline: Optional[bool] = None,
+    text_rotation: Optional[int] = None,
 ) -> str:
     """
     Applies formatting to a range: colors, number formats, text wrapping,
@@ -723,6 +757,10 @@ async def format_sheet_range(
         bold=bold,
         italic=italic,
         font_size=font_size,
+        font_family=font_family,
+        strikethrough=strikethrough,
+        underline=underline,
+        text_rotation=text_rotation,
     )
 
     # Build confirmation message with user email
