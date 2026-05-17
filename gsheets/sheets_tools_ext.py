@@ -1370,3 +1370,102 @@ async def insert_cells_with_shift(
         f"Inserted cells at '{range_name}' (shift={dim}) in {spreadsheet_id} "
         f"for {user_google_email}."
     )
+
+
+@server.tool()
+@handle_http_errors("manage_sheet_tab", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def manage_sheet_tab(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    action: str,
+    sheet_name: Optional[str] = None,
+    new_name: Optional[str] = None,
+    new_index: Optional[int] = None,
+    insert_sheet_index: Optional[int] = None,
+) -> str:
+    """
+    Manages sheet tabs in a spreadsheet (full clone, rename, delete, reorder).
+
+    Actions:
+        - duplicate: clones a sheet with ALL properties (merges, frozen rows,
+          column widths, formatting, conditional rules, charts).
+          Requires sheet_name. Optional: new_name, insert_sheet_index.
+        - rename: changes a sheet's title. Requires sheet_name and new_name.
+        - delete: removes a sheet. Requires sheet_name.
+        - reorder: moves a sheet to a new 0-based position. Requires
+          sheet_name and new_index.
+
+    Args:
+        user_google_email (str): The user's Google email. Required.
+        spreadsheet_id (str): Spreadsheet ID. Required.
+        action (str): duplicate | rename | delete | reorder. Required.
+        sheet_name (str): Source/target sheet name. Required for all actions.
+        new_name (str): New sheet name (rename / optional for duplicate).
+        new_index (int): 0-based target position (reorder).
+        insert_sheet_index (int): 0-based insertion position (duplicate).
+
+    Returns:
+        str: Confirmation; for duplicate includes new sheet id and title.
+    """
+    logger.info(
+        "[manage_sheet_tab] %s, %s, action=%s, sheet=%s",
+        user_google_email, spreadsheet_id, action, sheet_name,
+    )
+    action = action.lower()
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    target = _select_sheet(sheets, sheet_name)
+    sheet_id = target["properties"]["sheetId"]
+
+    if action == "duplicate":
+        dup: dict = {"sourceSheetId": sheet_id}
+        if new_name:
+            dup["newSheetName"] = new_name
+        if insert_sheet_index is not None:
+            dup["insertSheetIndex"] = insert_sheet_index
+        requests = [{"duplicateSheet": dup}]
+    elif action == "rename":
+        if not new_name:
+            raise UserInputError("rename requires new_name.")
+        requests = [{
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "title": new_name},
+                "fields": "title",
+            }
+        }]
+    elif action == "delete":
+        requests = [{"deleteSheet": {"sheetId": sheet_id}}]
+    elif action == "reorder":
+        if new_index is None:
+            raise UserInputError("reorder requires new_index.")
+        requests = [{
+            "updateSheetProperties": {
+                "properties": {"sheetId": sheet_id, "index": new_index},
+                "fields": "index",
+            }
+        }]
+    else:
+        raise UserInputError(
+            f"Unknown action '{action}'. Use: duplicate, rename, delete, reorder."
+        )
+
+    resp = await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": requests})
+        .execute
+    )
+
+    extra = ""
+    if action == "duplicate":
+        replies = resp.get("replies", [])
+        if replies:
+            new_props = replies[0].get("duplicateSheet", {}).get("properties", {})
+            new_id = new_props.get("sheetId")
+            new_title = new_props.get("title")
+            extra = f" \u2192 new sheet '{new_title}' (id={new_id})"
+
+    return (
+        f"Sheet tab {action} on '{sheet_name}' in spreadsheet "
+        f"{spreadsheet_id} for {user_google_email}{extra}."
+    )

@@ -106,6 +106,7 @@ sheets:
     - manage_chart
     - copy_paste_range
     - insert_cells_with_shift
+    - manage_sheet_tab
 
 chat:
   core:
