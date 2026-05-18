@@ -295,6 +295,7 @@ async def modify_sheet_values(
     values: Optional[Union[str, List[List[Any]]]] = None,
     value_input_option: str = "USER_ENTERED",
     clear_values: bool = False,
+    dry_run: bool = False,
 ) -> str:
     """
     Modifies values in a specific range of a Google Sheet - can write, update, or clear values.
@@ -310,13 +311,17 @@ async def modify_sheet_values(
             Required unless clear_values=True.
         value_input_option (str): How to interpret input values ("RAW" or "USER_ENTERED"). Defaults to "USER_ENTERED".
         clear_values (bool): If True, clears the range instead of writing values. Defaults to False.
+        dry_run (bool): If True, return a preview envelope (range, op, cell count,
+            value_input_option, first row sample) WITHOUT touching the spreadsheet.
+            Useful as a sanity-check before pushing a large matrix. Defaults to False.
 
     Returns:
-        str: Confirmation message of the successful modification operation.
+        str: Confirmation message of the successful modification operation,
+            or a JSON envelope when dry_run=True.
     """
     operation = "clear" if clear_values else "write"
     logger.info(
-        f"[modify_sheet_values] Invoked. Operation: {operation}, Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}, Range: {range_name}"
+        f"[modify_sheet_values] Invoked. Operation: {operation}, Email: '{user_google_email}', Spreadsheet: {spreadsheet_id}, Range: {range_name}, dry_run={dry_run}"
     )
 
     # Parse values if it's a JSON string (MCP passes parameters as JSON strings)
@@ -346,6 +351,37 @@ async def modify_sheet_values(
         raise UserInputError(
             "Either 'values' must be provided or 'clear_values' must be True."
         )
+
+    if dry_run:
+        # Phase 7.5: return a preview without hitting the API.
+        if clear_values:
+            envelope = {
+                "dry_run": True,
+                "operation": "clear",
+                "range": range_name,
+                "spreadsheet_id": spreadsheet_id,
+                "note": "Would clear the range. No API call made.",
+            }
+        else:
+            row_count = len(values) if values else 0
+            col_count = max((len(r) for r in values), default=0) if values else 0
+            total_cells = sum(len(r) for r in values) if values else 0
+            envelope = {
+                "dry_run": True,
+                "operation": "write",
+                "range": range_name,
+                "spreadsheet_id": spreadsheet_id,
+                "value_input_option": value_input_option,
+                "shape": {
+                    "rows": row_count,
+                    "max_columns": col_count,
+                    "total_cells": total_cells,
+                },
+                "preview_first_row": values[0] if values else [],
+                "preview_last_row": values[-1] if row_count > 1 else None,
+                "note": "Would write the matrix. No API call made.",
+            }
+        return json.dumps(envelope, ensure_ascii=False)
 
     if clear_values:
         result = await asyncio.to_thread(
@@ -1543,6 +1579,7 @@ async def _resize_sheet_dimensions_impl(
     insert_columns_at: Optional[str] = None,
     delete_rows: Optional[Union[str, List[Any]]] = None,
     delete_columns: Optional[Union[str, List[str]]] = None,
+    dry_run: bool = False,
 ) -> dict:
     """Internal implementation for resize_sheet_dimensions.
 
@@ -2014,6 +2051,16 @@ async def _resize_sheet_dimensions_impl(
             f"deleted columns: {', '.join(str(c) for c in delete_columns)}"
         )
 
+    # Phase 7.5: dry_run short-circuits before the API call.
+    if dry_run:
+        return {
+            "spreadsheet_id": spreadsheet_id,
+            "summary": "; ".join(applied_parts) if applied_parts else "no-op",
+            "dry_run": True,
+            "requests_count": len(requests),
+            "requests": requests,
+        }
+
     # Execute batch update
     await asyncio.to_thread(
         service.spreadsheets()
@@ -2051,6 +2098,7 @@ async def resize_sheet_dimensions(
     insert_columns_at: Optional[str] = None,
     delete_rows: Optional[Union[str, List[Any]]] = None,
     delete_columns: Optional[Union[str, List[str]]] = None,
+    dry_run: bool = False,
 ) -> str:
     """
     Manages sheet-level dimension properties: resize columns/rows, auto-resize
@@ -2098,9 +2146,13 @@ async def resize_sheet_dimensions(
             deletes (saves payload and quota).
         delete_columns (Optional[Union[str, List[str]]]): List of column
             letters to delete. Example: ["E", "F"].
+        dry_run (bool): If True, return a JSON envelope describing the requests
+            that WOULD be sent to Sheets, without executing them. Useful before
+            a bulk delete or large resize. Defaults to False.
 
     Returns:
-        str: Confirmation of the applied dimension changes.
+        str: Confirmation of the applied dimension changes, or a JSON envelope
+            when dry_run=True.
     """
     logger.info(
         "[resize_sheet_dimensions] Invoked. Email: '%s', Spreadsheet: %s",
@@ -2128,7 +2180,21 @@ async def resize_sheet_dimensions(
         insert_columns_at=insert_columns_at,
         delete_rows=delete_rows,
         delete_columns=delete_columns,
+        dry_run=dry_run,
     )
+
+    if result.get("dry_run"):
+        # Phase 7.5: return raw envelope so caller sees exactly what would happen.
+        return json.dumps(
+            {
+                "dry_run": True,
+                "spreadsheet_id": result["spreadsheet_id"],
+                "summary": result["summary"],
+                "requests_count": result.get("requests_count", 0),
+                "note": "No API call made. Drop dry_run=True to apply.",
+            },
+            ensure_ascii=False,
+        )
 
     return (
         f"Applied dimension changes in spreadsheet {result['spreadsheet_id']} "
