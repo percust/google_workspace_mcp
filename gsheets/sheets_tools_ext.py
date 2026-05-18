@@ -1824,3 +1824,207 @@ async def read_sheet_summary(
         ),
     }
     return json.dumps(envelope, ensure_ascii=False)
+
+
+# ============================================================================
+# Phase 7.8: batch_update_spreadsheet — raw Sheets batchUpdate, one round-trip
+# ============================================================================
+
+
+# Whitelist of request types the generic batcher accepts. Adding a new type:
+# (a) audit the request shape in the Sheets API ref, (b) make sure existing
+# specialised tools (merge_sheet_range etc.) still cover the common path, so
+# Claude doesn't *have* to learn the raw shape unless it wants a multi-op
+# round-trip.
+_BATCH_UPDATE_ALLOWED_REQUEST_TYPES = {
+    # Cell content & format
+    "updateCells",
+    "repeatCell",
+    "appendCells",
+    # Merges
+    "mergeCells",
+    "unmergeCells",
+    # Borders
+    "updateBorders",
+    # Sheet & dimension properties
+    "updateSheetProperties",
+    "updateDimensionProperties",
+    "insertDimension",
+    "deleteDimension",
+    "autoResizeDimensions",
+    "appendDimension",
+    # Charts (embedded objects)
+    "addChart",
+    "updateChartSpec",
+    "deleteEmbeddedObject",
+    "updateEmbeddedObjectPosition",
+    # Protected / named ranges
+    "addProtectedRange",
+    "updateProtectedRange",
+    "deleteProtectedRange",
+    "addNamedRange",
+    "updateNamedRange",
+    "deleteNamedRange",
+    # Banding & conditional formatting
+    "addBanding",
+    "updateBanding",
+    "deleteBanding",
+    "addConditionalFormatRule",
+    "updateConditionalFormatRule",
+    "deleteConditionalFormatRule",
+    # Filter views & basic filters
+    "addFilterView",
+    "updateFilterView",
+    "deleteFilterView",
+    "setBasicFilter",
+    "clearBasicFilter",
+    # Data validation
+    "setDataValidation",
+    # Sort
+    "sortRange",
+    # Find & replace
+    "findReplace",
+    # Group / ungroup dimensions
+    "addDimensionGroup",
+    "deleteDimensionGroup",
+    "updateDimensionGroup",
+    # Copy / paste / cut-paste / clear formatting
+    "copyPaste",
+    "cutPaste",
+    "updateCells",  # already above; harmless dup
+    # Note: deleteSheet is intentionally NOT here — channel it through
+    # manage_sheet_tab so the soft-confirm gate stays in place.
+}
+
+
+@server.tool()
+@handle_http_errors("batch_update_spreadsheet", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def batch_update_spreadsheet(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    requests: Union[str, List[dict]],
+    include_responses: bool = False,
+    dry_run: bool = False,
+) -> str:
+    """
+    Sends a list of raw Sheets API requests as ONE batchUpdate call.
+
+    When to reach for this: when you need to combine several operations
+    (merge + format + border + freeze + chart) on the same spreadsheet
+    and would otherwise issue 5-10 separate calls. One batchUpdate =
+    one round-trip + one quota slot.
+
+    When NOT to: for a single operation, prefer the specialised tool
+    (merge_sheet_range, set_range_borders, format_sheet_range,
+    manage_sheet_tab, etc.). The specialised tools have ergonomic
+    A1-range parsing and cleaner argument shapes — this tool is the
+    bare Sheets API.
+
+    Each request in the array is a dict with EXACTLY ONE top-level key
+    naming the request type. Request bodies follow the Sheets API
+    Request schema verbatim — see https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/request
+
+    Allowed request types (subset of Sheets API; deleteSheet is gated
+    through manage_sheet_tab for soft-confirm):
+      cells: updateCells, repeatCell, appendCells
+      merges: mergeCells, unmergeCells
+      borders: updateBorders
+      sheet/dim props: updateSheetProperties, updateDimensionProperties,
+        insertDimension, deleteDimension, autoResizeDimensions, appendDimension
+      charts: addChart, updateChartSpec, deleteEmbeddedObject, updateEmbeddedObjectPosition
+      ranges: addProtectedRange/update/delete, addNamedRange/update/delete
+      banding/CF: addBanding/update/delete, addConditionalFormatRule/update/delete
+      filters: addFilterView/update/delete, setBasicFilter, clearBasicFilter
+      misc: setDataValidation, sortRange, findReplace, copyPaste, cutPaste,
+        addDimensionGroup/delete/update
+
+    Example — merge B2:D2 and bold-format the result in one call:
+      [
+        {"mergeCells": {
+            "range": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2,
+                      "startColumnIndex": 1, "endColumnIndex": 4},
+            "mergeType": "MERGE_ALL"}},
+        {"repeatCell": {
+            "range": {"sheetId": 0, "startRowIndex": 1, "endRowIndex": 2,
+                      "startColumnIndex": 1, "endColumnIndex": 4},
+            "cell": {"userEnteredFormat": {"textFormat": {"bold": true}}},
+            "fields": "userEnteredFormat.textFormat.bold"}}
+      ]
+
+    Args:
+        user_google_email (str): The user's Google email. Required.
+        spreadsheet_id (str): Spreadsheet ID. Required.
+        requests (Union[str, List[dict]]): Array of Sheets API Request objects
+            (or a JSON string). Each request must have exactly one allowed
+            top-level key. Required, must be non-empty.
+        include_responses (bool): If True, the JSON envelope includes the
+            replies array from batchUpdate (useful for duplicateSheet,
+            addChart, addFilterView, etc.). Default False — fewer tokens.
+        dry_run (bool): If True, validates request shapes and returns a
+            preview envelope WITHOUT calling the API. Default False.
+
+    Returns:
+        str: JSON envelope with applied request count and (optionally) replies.
+    """
+    logger.info(
+        "[batch_update_spreadsheet] %s, %s, dry_run=%s, include_responses=%s",
+        user_google_email, spreadsheet_id, dry_run, include_responses,
+    )
+
+    if isinstance(requests, str):
+        try:
+            requests = json.loads(requests)
+        except json.JSONDecodeError as e:
+            raise UserInputError(f"Invalid JSON for requests: {e}")
+    if not isinstance(requests, list):
+        raise UserInputError("requests must be a list of Sheets API Request objects.")
+    if not requests:
+        raise UserInputError("requests is empty.")
+
+    seen_types: dict = {}
+    for i, req in enumerate(requests):
+        if not isinstance(req, dict):
+            raise UserInputError(f"requests[{i}] must be a dict, got {type(req).__name__}.")
+        if len(req) != 1:
+            raise UserInputError(
+                f"requests[{i}] must have exactly one top-level key (the request type), "
+                f"got keys: {sorted(req.keys())}"
+            )
+        req_type = next(iter(req))
+        if req_type not in _BATCH_UPDATE_ALLOWED_REQUEST_TYPES:
+            raise UserInputError(
+                f"requests[{i}] uses disallowed type '{req_type}'. "
+                f"Allowed types: {sorted(_BATCH_UPDATE_ALLOWED_REQUEST_TYPES)}. "
+                f"For deleteSheet, use manage_sheet_tab(action='delete')."
+            )
+        seen_types[req_type] = seen_types.get(req_type, 0) + 1
+
+    if dry_run:
+        return json.dumps(
+            {
+                "dry_run": True,
+                "spreadsheet_id": spreadsheet_id,
+                "request_count": len(requests),
+                "request_type_counts": seen_types,
+                "note": "Shapes validated, no API call made. Drop dry_run=True to apply.",
+            },
+            ensure_ascii=False,
+        )
+
+    body = {"requests": requests, "includeSpreadsheetInResponse": False}
+    resp = await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=body)
+        .execute
+    )
+
+    envelope: dict = {
+        "spreadsheet_id": spreadsheet_id,
+        "applied_count": len(requests),
+        "request_type_counts": seen_types,
+    }
+    if include_responses:
+        envelope["replies"] = resp.get("replies", [])
+    return json.dumps(envelope, ensure_ascii=False)
