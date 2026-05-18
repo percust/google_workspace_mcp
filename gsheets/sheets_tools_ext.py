@@ -1675,3 +1675,152 @@ async def set_sparse_cells(
         f"{updated_ranges} range(s) in spreadsheet {spreadsheet_id} "
         f"for {user_google_email}."
     )
+
+
+# ============================================================================
+# Phase 7.7: read_sheet_summary — structure-only peek, no full grid dump
+# ============================================================================
+
+
+@server.tool()
+@handle_http_errors("read_sheet_summary", is_read_only=True, service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def read_sheet_summary(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+    header_rows: int = 3,
+    sample_columns: int = 26,
+) -> str:
+    """
+    Returns the SHAPE of a sheet without dumping every cell. Use this as a
+    cheap first look at a large sheet — far smaller than read_sheet_values.
+
+    Payload contains:
+        - dimensions (rowCount, columnCount, frozenRows, frozenColumns)
+        - merged ranges (count + a sample)
+        - the first `header_rows` rows of values (default 3)
+        - the LAST non-empty row of values (when the sheet is taller than
+          header_rows)
+        - a sample of column letters
+
+    Costs two Sheets API calls (metadata + values.get for the header band)
+    plus one optional call for the trailing row. Compare to read_sheet_values
+    on A1:Z1000 which can blow 50-100 KB of tokens for nothing.
+
+    Args:
+        user_google_email (str): The user's Google email. Required.
+        spreadsheet_id (str): Spreadsheet ID. Required.
+        sheet_name (Optional[str]): Sheet to inspect. Defaults to the first
+            sheet of the spreadsheet.
+        header_rows (int): How many top rows to sample (1-10). Default 3.
+        sample_columns (int): How many leftmost columns to include in the
+            header sample (1-50). Default 26 (A..Z).
+
+    Returns:
+        str: JSON envelope with the summary.
+    """
+    logger.info(
+        "[read_sheet_summary] %s, %s, sheet=%s",
+        user_google_email, spreadsheet_id, sheet_name,
+    )
+    if not 1 <= header_rows <= 10:
+        raise UserInputError("header_rows must be between 1 and 10.")
+    if not 1 <= sample_columns <= 50:
+        raise UserInputError("sample_columns must be between 1 and 50.")
+
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields=(
+                "properties.title,"
+                "sheets(properties(sheetId,title,index,gridProperties),merges)"
+            ),
+        )
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+    if not sheets:
+        raise UserInputError("No sheets in spreadsheet.")
+
+    target = _select_sheet(sheets, sheet_name)
+    props = target.get("properties", {})
+    grid = props.get("gridProperties", {})
+    resolved_name = props.get("title")
+    row_count = grid.get("rowCount", 0)
+    col_count = grid.get("columnCount", 0)
+
+    # Convert sample_columns to an end-column letter (1 -> "A", 26 -> "Z", 27 -> "AA").
+    def _col_letter(n: int) -> str:
+        result = ""
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            result = chr(ord("A") + rem) + result
+        return result
+
+    end_col = _col_letter(min(sample_columns, col_count or sample_columns))
+    header_end = min(header_rows, row_count) if row_count else header_rows
+    header_range = f"'{resolved_name}'!A1:{end_col}{header_end}"
+
+    header_resp = await asyncio.to_thread(
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=header_range)
+        .execute
+    )
+    header_values = header_resp.get("values", [])
+
+    last_row_values = None
+    if row_count > header_rows and row_count > 0:
+        last_range = f"'{resolved_name}'!A{row_count}:{end_col}{row_count}"
+        last_resp = await asyncio.to_thread(
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=last_range)
+            .execute
+        )
+        last_row_values = last_resp.get("values", [[]])
+        last_row_values = last_row_values[0] if last_row_values else []
+
+    merges = target.get("merges", []) or []
+    merge_sample = []
+    for m in merges[:5]:
+        merge_sample.append({
+            "start_row": m.get("startRowIndex", 0) + 1,
+            "end_row": m.get("endRowIndex", 0),
+            "start_col": _col_letter(m.get("startColumnIndex", 0) + 1),
+            "end_col": _col_letter(m.get("endColumnIndex", 0)),
+        })
+
+    envelope = {
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_title": metadata.get("properties", {}).get("title"),
+        "sheet": {
+            "name": resolved_name,
+            "sheet_id": props.get("sheetId"),
+            "index": props.get("index"),
+            "row_count": row_count,
+            "column_count": col_count,
+            "frozen_rows": grid.get("frozenRowCount", 0),
+            "frozen_columns": grid.get("frozenColumnCount", 0),
+        },
+        "merges": {
+            "count": len(merges),
+            "sample": merge_sample,
+        },
+        "header_sample": {
+            "range": header_range,
+            "values": header_values,
+        },
+        "last_row": {
+            "row_number": row_count if row_count > header_rows else None,
+            "values": last_row_values,
+        },
+        "note": (
+            "This is a structural summary, not a full dump. "
+            "Use read_sheet_values with a narrow range to fetch actual data."
+        ),
+    }
+    return json.dumps(envelope, ensure_ascii=False)
