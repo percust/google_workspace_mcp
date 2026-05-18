@@ -1571,3 +1571,107 @@ async def manage_sheet_tab(
         f"Sheet tab {action} on '{sheet_name}' in spreadsheet "
         f"{spreadsheet_id} for {user_google_email}{extra}."
     )
+
+
+# ============================================================================
+# Phase 7.6: set_sparse_cells — write a scattered map of {A1: value} in one call
+# ============================================================================
+
+
+@server.tool()
+@handle_http_errors("set_sparse_cells", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def set_sparse_cells(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    cells: Union[str, dict],
+    sheet_name: Optional[str] = None,
+    value_input_option: str = "USER_ENTERED",
+) -> str:
+    """
+    Writes a scattered set of cells in ONE call. The opposite of
+    modify_sheet_values which requires a dense matrix.
+
+    Use this when you need to set a handful of cells in disparate locations,
+    e.g. {"A1": "Title", "B5": 42, "AT15": "=SUM(A1:A10)"}. Compared to
+    modify_sheet_values on a wide range, this avoids transmitting empty
+    cells in between (x10+ saving on sparse layouts).
+
+    Under the hood: one spreadsheets.values.batchUpdate request with one
+    ValueRange per cell. Sheets de-duplicates against existing cells, so
+    formulas referencing other cells still resolve.
+
+    Args:
+        user_google_email (str): The user's Google email. Required.
+        spreadsheet_id (str): Spreadsheet ID. Required.
+        cells (Union[str, dict]): Map from A1 reference to value. Each key
+            may include a sheet prefix ("Sheet1!A1") or omit it ("A1") in
+            which case sheet_name applies. Values can be any JSON-serialisable
+            scalar (str / int / float / bool / None). Accepts a JSON string.
+            Example: {"A1": "Hello", "B5": 42, "Sheet2!AT15": "=SUM(A1:A10)"}
+        sheet_name (Optional[str]): Default sheet for keys that lack a prefix.
+            If omitted, the spreadsheet's first sheet is used.
+        value_input_option (str): "USER_ENTERED" (default, Sheets parses
+            numbers, dates, formulas) or "RAW".
+
+    Returns:
+        str: Confirmation with updated cell count and range summary.
+    """
+    logger.info(
+        "[set_sparse_cells] %s, %s, sheet=%s",
+        user_google_email, spreadsheet_id, sheet_name,
+    )
+
+    if isinstance(cells, str):
+        try:
+            cells = json.loads(cells)
+        except json.JSONDecodeError as e:
+            raise UserInputError(f"Invalid JSON for cells: {e}")
+    if not isinstance(cells, dict):
+        raise UserInputError("cells must be a dict of {A1: value}.")
+    if not cells:
+        raise UserInputError("cells is empty — nothing to write.")
+    if value_input_option not in ("USER_ENTERED", "RAW"):
+        raise UserInputError(
+            f"value_input_option must be USER_ENTERED or RAW, got '{value_input_option}'."
+        )
+
+    # Resolve default sheet name when keys omit the prefix.
+    default_sheet = sheet_name
+    if default_sheet is None:
+        sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+        default_sheet = sheets[0]["properties"]["title"]
+
+    def _resolve_range(a1_key: str) -> str:
+        a1_key = a1_key.strip()
+        if not a1_key:
+            raise UserInputError("Empty cell key.")
+        if "!" in a1_key:
+            return a1_key
+        # Quote sheet name if it contains spaces or special chars.
+        if any(c in default_sheet for c in " !'\""):
+            safe = default_sheet.replace("'", "''")
+            return f"'{safe}'!{a1_key}"
+        return f"{default_sheet}!{a1_key}"
+
+    data = [
+        {"range": _resolve_range(key), "values": [[value]]}
+        for key, value in cells.items()
+    ]
+
+    body = {"valueInputOption": value_input_option, "data": data}
+    result = await asyncio.to_thread(
+        service.spreadsheets()
+        .values()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body=body)
+        .execute
+    )
+
+    updated_cells = result.get("totalUpdatedCells", len(data))
+    updated_ranges = result.get("totalUpdatedRanges", len(data))
+    return (
+        f"set_sparse_cells: wrote {updated_cells} cell(s) across "
+        f"{updated_ranges} range(s) in spreadsheet {spreadsheet_id} "
+        f"for {user_google_email}."
+    )
