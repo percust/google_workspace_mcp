@@ -138,9 +138,14 @@ async def merge_sheet_range(
         )
     sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
     grid_range = _parse_a1_range(range_name, sheets)
+    # Phase 7.2: unmerge the same range first inside the same batchUpdate, so the
+    # operation is idempotent and survives both pre-existing overlapping merges
+    # and freshly-created sheets (Sheets API otherwise yells "You must select
+    # all cells in a merged range"). Unmerge on a range with no merges is a no-op.
     body = {
         "requests": [
-            {"mergeCells": {"range": grid_range, "mergeType": merge_type}}
+            {"unmergeCells": {"range": grid_range}},
+            {"mergeCells": {"range": grid_range, "mergeType": merge_type}},
         ]
     }
     await asyncio.to_thread(
