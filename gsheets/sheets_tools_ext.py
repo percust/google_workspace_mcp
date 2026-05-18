@@ -27,7 +27,9 @@ rather than create a parallel one.
 import logging
 import asyncio
 import json
-from typing import List, Optional, Union
+import time
+import uuid
+from typing import Any, List, Optional, Union
 
 from auth.service_decorator import require_google_service
 from core.server import server
@@ -40,6 +42,63 @@ from gsheets.sheets_helpers import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# ---------- Phase 7.4: soft-confirm tokens for destructive ops ----------
+#
+# In-memory only; the workspace-mcp container is a single process so this
+# survives without external state. TTL is short (5 min) and the dict is
+# bounded by lazy cleanup on every access. If we ever scale to multiple
+# replicas, swap this for Redis or an explicit DB-backed store — but the
+# tool's interface (two-call dance, no client-side state) stays the same.
+
+_DESTRUCTIVE_CONFIRM_TTL_SECONDS = 300
+_pending_destructive_confirms: dict = {}
+
+
+def _cleanup_pending_confirms() -> None:
+    now = time.time()
+    expired = [
+        tok
+        for tok, rec in _pending_destructive_confirms.items()
+        if now - rec.get("created_at", 0) > _DESTRUCTIVE_CONFIRM_TTL_SECONDS
+    ]
+    for tok in expired:
+        _pending_destructive_confirms.pop(tok, None)
+
+
+def _issue_destructive_confirm(op: str, payload: dict) -> str:
+    """Generate a one-shot confirm token for an irreversible op. Returns the token."""
+    _cleanup_pending_confirms()
+    token = uuid.uuid4().hex
+    _pending_destructive_confirms[token] = {
+        "op": op,
+        "payload": payload,
+        "created_at": time.time(),
+    }
+    return token
+
+
+def _consume_destructive_confirm(op: str, token: str, payload: dict) -> None:
+    """Validate and pop a confirm token. Raises UserInputError on mismatch/expiry."""
+    _cleanup_pending_confirms()
+    rec = _pending_destructive_confirms.pop(token, None)
+    if rec is None:
+        raise UserInputError(
+            f"confirm_token '{token[:8]}...' is unknown or expired. "
+            f"Call the tool again without confirm_token to obtain a fresh one."
+        )
+    if rec.get("op") != op:
+        raise UserInputError(
+            f"confirm_token was issued for op '{rec.get('op')}', not '{op}'."
+        )
+    saved_payload = rec.get("payload", {})
+    for key, expected in saved_payload.items():
+        if payload.get(key) != expected:
+            raise UserInputError(
+                f"confirm_token does not match current arguments "
+                f"(field '{key}' differs). Re-request a fresh token."
+            )
 
 
 # ---------- Shared utilities ----------
@@ -1389,6 +1448,7 @@ async def manage_sheet_tab(
     new_name: Optional[str] = None,
     new_index: Optional[int] = None,
     insert_sheet_index: Optional[int] = None,
+    confirm_token: Optional[str] = None,
 ) -> str:
     """
     Manages sheet tabs in a spreadsheet (full clone, rename, delete, reorder).
@@ -1398,7 +1458,12 @@ async def manage_sheet_tab(
           column widths, formatting, conditional rules, charts).
           Requires sheet_name. Optional: new_name, insert_sheet_index.
         - rename: changes a sheet's title. Requires sheet_name and new_name.
-        - delete: removes a sheet. Requires sheet_name.
+        - delete: removes a sheet. Requires sheet_name. TWO-STEP:
+            1) Call without confirm_token -> returns a JSON envelope with
+               requires_confirmation=true and a token (TTL 5 min).
+            2) Call again with confirm_token=<token> and the SAME
+               spreadsheet_id + sheet_name -> performs the delete.
+            Token is consumed on use and cannot be replayed.
         - reorder: moves a sheet to a new 0-based position. Requires
           sheet_name and new_index.
 
@@ -1410,18 +1475,22 @@ async def manage_sheet_tab(
         new_name (str): New sheet name (rename / optional for duplicate).
         new_index (int): 0-based target position (reorder).
         insert_sheet_index (int): 0-based insertion position (duplicate).
+        confirm_token (str): Two-step confirmation token for action=delete.
+            Ignored by other actions.
 
     Returns:
         str: Confirmation; for duplicate includes new sheet id and title.
+            For an unconfirmed delete returns a JSON envelope with the token.
     """
     logger.info(
-        "[manage_sheet_tab] %s, %s, action=%s, sheet=%s",
-        user_google_email, spreadsheet_id, action, sheet_name,
+        "[manage_sheet_tab] %s, %s, action=%s, sheet=%s, has_confirm=%s",
+        user_google_email, spreadsheet_id, action, sheet_name, bool(confirm_token),
     )
     action = action.lower()
     sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
     target = _select_sheet(sheets, sheet_name)
     sheet_id = target["properties"]["sheetId"]
+    resolved_sheet_name = target["properties"].get("title", sheet_name)
 
     if action == "duplicate":
         dup: dict = {"sourceSheetId": sheet_id}
@@ -1440,6 +1509,34 @@ async def manage_sheet_tab(
             }
         }]
     elif action == "delete":
+        # Phase 7.4: two-step confirmation. First call returns a token; second
+        # call with the token (and matching spreadsheet_id + sheet_name) deletes.
+        confirm_payload = {
+            "spreadsheet_id": spreadsheet_id,
+            "sheet_name": resolved_sheet_name,
+            "sheet_id": sheet_id,
+        }
+        if not confirm_token:
+            token = _issue_destructive_confirm("manage_sheet_tab:delete", confirm_payload)
+            envelope = {
+                "requires_confirmation": True,
+                "op": "manage_sheet_tab:delete",
+                "token": token,
+                "ttl_seconds": _DESTRUCTIVE_CONFIRM_TTL_SECONDS,
+                "spreadsheet_id": spreadsheet_id,
+                "sheet_name": resolved_sheet_name,
+                "sheet_id": sheet_id,
+                "instructions": (
+                    "Sheet deletion is irreversible. Show the user the sheet name "
+                    "above, get explicit approval, then call manage_sheet_tab again "
+                    "with action='delete', the same spreadsheet_id and sheet_name, "
+                    "and confirm_token set to the value above."
+                ),
+            }
+            return json.dumps(envelope, ensure_ascii=False)
+        _consume_destructive_confirm(
+            "manage_sheet_tab:delete", confirm_token, confirm_payload
+        )
         requests = [{"deleteSheet": {"sheetId": sheet_id}}]
     elif action == "reorder":
         if new_index is None:
