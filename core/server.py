@@ -161,17 +161,43 @@ _streaming_policy = (
     "- Never base64-encode file content into tool arguments. Always stream bytes via HTTP."
 )
 
+_sheets_efficiency_policy = (
+    "Sheets tool-selection policy (workspace-mcp phase 7.9):\n"
+    "- Prefer the cheapest read first. Before editing anything, fetch a NARROW "
+    "read_sheet_values range (10-30 cells around the area you care about), or use "
+    "read_sheet_summary for structure-only inspection of large sheets — never start "
+    "with read_sheet_values on A1:Z1000.\n"
+    "- For small edits (<=10 cells), call modify_sheet_values on a NARROW range, "
+    "not a full-table rewrite. For scattered cells, use set_sparse_cells with a "
+    "{A1: value} dict instead of a dense matrix padded with empties.\n"
+    "- For several merges / formats / borders / freezes in a row on the same "
+    "spreadsheet, combine them into ONE batch_update_spreadsheet call rather than "
+    "5-10 separate tool calls. Specialised tools (merge_sheet_range, "
+    "set_range_borders, format_sheet_range, etc.) stay best for single ops.\n"
+    "- Sheet tabs: do NOT use manage_sheet_tab(action='delete') + create_sheet as a "
+    "way to 'reset' data or formatting — that is structural surgery for the wrong "
+    "problem. Clear cells with modify_sheet_values(clear_values=True) and reformat "
+    "with format_sheet_range / clear_range_formatting. delete is reserved for genuine "
+    "tab removal, and is two-step (soft-confirm token).\n"
+    "- Destructive or large ops need explicit user confirmation in chat BEFORE the "
+    "call: deleting a sheet tab, writing >200 cells in one shot, mass delete_rows. "
+    "Use dry_run=True on modify_sheet_values / resize_sheet_dimensions / "
+    "batch_update_spreadsheet to preview before committing."
+)
+
+_combined_policy = f"{_streaming_policy}\n\n{_sheets_efficiency_policy}"
+
 if USER_GOOGLE_EMAIL:
     _server_instructions = (
         f"Connected Google account: {USER_GOOGLE_EMAIL}\n\n"
         f"When using Google Workspace tools, always use `{USER_GOOGLE_EMAIL}` as the "
         f"`user_google_email` parameter. Do not ask the user for their email address.\n\n"
-        f"{_streaming_policy}"
+        f"{_combined_policy}"
     )
     logger.info(f"Server instructions configured for user: {USER_GOOGLE_EMAIL}")
 else:
-    _server_instructions = _streaming_policy
-    logger.info("Server instructions: streaming-only upload policy")
+    _server_instructions = _combined_policy
+    logger.info("Server instructions: streaming-only upload policy + sheets efficiency policy")
 
 server = SecureFastMCP(
     name="google_workspace",

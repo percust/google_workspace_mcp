@@ -107,6 +107,9 @@ sheets:
     - copy_paste_range
     - insert_cells_with_shift
     - manage_sheet_tab
+    - set_sparse_cells
+    - read_sheet_summary
+    - batch_update_spreadsheet
 
 chat:
   core:
