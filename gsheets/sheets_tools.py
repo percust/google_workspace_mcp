@@ -1541,7 +1541,7 @@ async def _resize_sheet_dimensions_impl(
     insert_rows_at: Optional[int] = None,
     insert_columns: Optional[int] = None,
     insert_columns_at: Optional[str] = None,
-    delete_rows: Optional[Union[str, List[int]]] = None,
+    delete_rows: Optional[Union[str, List[Any]]] = None,
     delete_columns: Optional[Union[str, List[str]]] = None,
 ) -> dict:
     """Internal implementation for resize_sheet_dimensions.
@@ -1925,37 +1925,63 @@ async def _resize_sheet_dimensions_impl(
             )
             applied_parts.append(f"appended {insert_columns} column(s)")
 
-    # Build delete row requests (process in reverse to keep indices stable)
+    # Build delete row requests (process in reverse to keep indices stable).
+    # Phase 7.3: each element may be either an int (single row) or a
+    # [start, end] pair (inclusive 1-based range). Ranges collapse into one
+    # deleteDimension request, dramatically shrinking payload for bulk deletes.
     if delete_rows:
         if not isinstance(delete_rows, list):
-            raise UserInputError("delete_rows must be a list of row numbers.")
-        parsed_delete_rows = []
-        for row_num in delete_rows:
-            try:
-                parsed_delete_rows.append(int(row_num))
-            except ValueError as exc:
-                raise UserInputError(
-                    f"Row number must be an integer >= 1 in delete_rows, got {row_num}."
-                ) from exc
-        sorted_rows = sorted(parsed_delete_rows, reverse=True)
-        for row_num in sorted_rows:
-            if row_num < 1:
-                raise UserInputError(
-                    f"Row number must be >= 1 in delete_rows, got {row_num}."
-                )
+            raise UserInputError("delete_rows must be a list.")
+        parsed_ranges: list = []
+        for item in delete_rows:
+            if isinstance(item, (list, tuple)):
+                if len(item) != 2:
+                    raise UserInputError(
+                        f"delete_rows range must be [start, end], got {item}."
+                    )
+                try:
+                    start_row = int(item[0])
+                    end_row = int(item[1])
+                except (TypeError, ValueError) as exc:
+                    raise UserInputError(
+                        f"delete_rows range endpoints must be integers, got {item}."
+                    ) from exc
+                if start_row < 1 or end_row < start_row:
+                    raise UserInputError(
+                        f"delete_rows range must satisfy 1 <= start <= end, got {item}."
+                    )
+                parsed_ranges.append((start_row, end_row))
+            else:
+                try:
+                    row_num = int(item)
+                except (TypeError, ValueError) as exc:
+                    raise UserInputError(
+                        f"Row number must be an integer >= 1 in delete_rows, got {item}."
+                    ) from exc
+                if row_num < 1:
+                    raise UserInputError(
+                        f"Row number must be >= 1 in delete_rows, got {row_num}."
+                    )
+                parsed_ranges.append((row_num, row_num))
+        # Sort by start desc to keep indices stable across deletions.
+        parsed_ranges.sort(key=lambda r: r[0], reverse=True)
+        for start_row, end_row in parsed_ranges:
             requests.append(
                 {
                     "deleteDimension": {
                         "range": {
                             "sheetId": sheet_id,
                             "dimension": "ROWS",
-                            "startIndex": row_num - 1,
-                            "endIndex": row_num,
+                            "startIndex": start_row - 1,
+                            "endIndex": end_row,
                         }
                     }
                 }
             )
-        applied_parts.append(f"deleted rows: {', '.join(str(r) for r in delete_rows)}")
+        summary_parts = [
+            (f"{s}" if s == e else f"{s}-{e}") for s, e in parsed_ranges
+        ]
+        applied_parts.append(f"deleted rows: {', '.join(summary_parts)}")
 
     # Build delete column requests (process in reverse to keep indices stable)
     if delete_columns:
@@ -2023,7 +2049,7 @@ async def resize_sheet_dimensions(
     insert_rows_at: Optional[int] = None,
     insert_columns: Optional[int] = None,
     insert_columns_at: Optional[str] = None,
-    delete_rows: Optional[Union[str, List[int]]] = None,
+    delete_rows: Optional[Union[str, List[Any]]] = None,
     delete_columns: Optional[Union[str, List[str]]] = None,
 ) -> str:
     """
@@ -2064,8 +2090,12 @@ async def resize_sheet_dimensions(
         insert_columns (Optional[int]): Number of columns to insert.
         insert_columns_at (Optional[str]): Column letter to insert before
             (e.g. "C"). Appends to the end if omitted.
-        delete_rows (Optional[Union[str, List[int]]]): List of 1-based row
-            numbers to delete. Example: [5, 6].
+        delete_rows (Optional[Union[str, List]]): Items to delete. Each item is
+            either a single 1-based row number (int) or a [start, end] pair
+            (inclusive 1-based range). Example: [5, [10, 20], 25] deletes
+            row 5, rows 10-20, row 25. Ranges collapse into one deleteDimension
+            request — prefer them over enumerating individual rows for bulk
+            deletes (saves payload and quota).
         delete_columns (Optional[Union[str, List[str]]]): List of column
             letters to delete. Example: ["E", "F"].
 
