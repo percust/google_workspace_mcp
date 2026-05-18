@@ -8,7 +8,7 @@ import logging
 import asyncio
 import json
 import copy
-from typing import List, Optional, Union
+from typing import Any, List, Optional, Union
 
 from auth.service_decorator import require_google_service
 from core.server import server
@@ -292,7 +292,7 @@ async def modify_sheet_values(
     user_google_email: str,
     spreadsheet_id: str,
     range_name: str,
-    values: Optional[Union[str, List[List[str]]]] = None,
+    values: Optional[Union[str, List[List[Any]]]] = None,
     value_input_option: str = "USER_ENTERED",
     clear_values: bool = False,
 ) -> str:
@@ -303,7 +303,11 @@ async def modify_sheet_values(
         user_google_email (str): The user's Google email address. Required.
         spreadsheet_id (str): The ID of the spreadsheet. Required.
         range_name (str): The range to modify (e.g., "Sheet1!A1:D10", "A1:D10"). Required.
-        values (Optional[Union[str, List[List[str]]]]): 2D array of values to write/update. Can be a JSON string or Python list. Required unless clear_values=True.
+        values (Optional[Union[str, List[List[Any]]]]): 2D array of values to write/update.
+            Cells can hold any JSON-serialisable scalar (str / int / float / bool / None).
+            With value_input_option="USER_ENTERED" (default) Sheets parses numbers, dates
+            and formulas; with "RAW" everything is stored as-is. Can also be a JSON string.
+            Required unless clear_values=True.
         value_input_option (str): How to interpret input values ("RAW" or "USER_ENTERED"). Defaults to "USER_ENTERED".
         clear_values (bool): If True, clears the range instead of writing values. Defaults to False.
 
