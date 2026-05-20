@@ -1892,6 +1892,13 @@ _BATCH_UPDATE_ALLOWED_REQUEST_TYPES = {
     "copyPaste",
     "cutPaste",
     "updateCells",  # already above; harmless dup
+    # Phase 9: extra requests
+    "moveDimension",
+    "autoFill",
+    "deleteDuplicates",
+    "trimWhitespace",
+    "insertRange",
+    "deleteRange",
     # Note: deleteSheet is intentionally NOT here — channel it through
     # manage_sheet_tab so the soft-confirm gate stays in place.
 }
@@ -2346,3 +2353,481 @@ async def copy_sheets_to_spreadsheet(
         "results": results,
     }
     return json.dumps(envelope, ensure_ascii=False)
+
+
+# ============================================================================
+# Phase 9: structure-only reads + renumber_column (21 мая 2026)
+# ============================================================================
+
+
+def _gridrange_to_a1(gr: dict, sheet_title: str) -> str:
+    """Convert a GridRange dict (zero-based half-open) to an A1 string.
+
+    The Sheets API returns ranges as half-open intervals: startRowIndex is
+    inclusive, endRowIndex is exclusive. We map back to A1 with safe
+    handling of "whole row" or "whole column" ranges that omit indices.
+    """
+
+    def _col_letter(n: int) -> str:
+        result = ""
+        n += 1
+        while n > 0:
+            n, rem = divmod(n - 1, 26)
+            result = chr(65 + rem) + result
+        return result
+
+    sr = gr.get("startRowIndex")
+    er = gr.get("endRowIndex")
+    sc = gr.get("startColumnIndex")
+    ec = gr.get("endColumnIndex")
+    parts = ["'%s'" % sheet_title if " " in sheet_title or "." in sheet_title else sheet_title]
+    if sc is not None and ec is not None and sr is not None and er is not None:
+        start = f"{_col_letter(sc)}{sr + 1}"
+        end = f"{_col_letter(ec - 1)}{er}"
+        return f"{parts[0]}!{start}:{end}"
+    if sc is not None and ec is not None:
+        return f"{parts[0]}!{_col_letter(sc)}:{_col_letter(ec - 1)}"
+    if sr is not None and er is not None:
+        return f"{parts[0]}!{sr + 1}:{er}"
+    return parts[0]
+
+
+@server.tool()
+@handle_http_errors("get_merged_ranges", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_merged_ranges(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    List merged ranges in a spreadsheet.
+
+    Compact alternative to read_sheet_values with includeGridData — returns
+    only the structural metadata, no cell values. One API call regardless of
+    sheet size.
+
+    Args:
+        user_google_email: The user's Google email.
+        spreadsheet_id: Spreadsheet ID.
+        sheet_name: Limit to a specific sheet. If None, returns merges for all
+            sheets in the spreadsheet.
+
+    Returns:
+        str: JSON envelope with per-sheet merge lists (A1 references).
+    """
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    if sheet_name:
+        sheets = [_select_sheet(sheets, sheet_name)]
+    out = []
+    for s in sheets:
+        title = s["properties"].get("title", "")
+        merges = s.get("merges", []) or []
+        out.append({
+            "sheet_name": title,
+            "sheet_id": s["properties"].get("sheetId"),
+            "merge_count": len(merges),
+            "merges": [_gridrange_to_a1(m, title) for m in merges],
+        })
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "sheets": out,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("get_named_ranges", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_named_ranges(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+) -> str:
+    """
+    List named ranges in a spreadsheet.
+
+    Compact one-call read of spreadsheet-level named-range definitions. Used
+    when wiring up cross-sheet formulas or auditing range references without
+    pulling cell data.
+
+    Returns:
+        str: JSON envelope with named ranges (name, id, range as A1).
+    """
+    meta = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            fields="namedRanges,sheets.properties(sheetId,title)",
+        )
+        .execute
+    )
+    sheet_title_by_id = {
+        s["properties"]["sheetId"]: s["properties"].get("title", "")
+        for s in meta.get("sheets", [])
+    }
+    out = []
+    for nr in meta.get("namedRanges", []):
+        rng = nr.get("range", {})
+        sid = rng.get("sheetId")
+        title = sheet_title_by_id.get(sid, "")
+        out.append({
+            "name": nr.get("name"),
+            "named_range_id": nr.get("namedRangeId"),
+            "sheet_name": title,
+            "range": _gridrange_to_a1(rng, title),
+        })
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "named_ranges": out,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("get_conditional_formats", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_conditional_formats(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    List conditional format rules in a spreadsheet.
+
+    Returns compact rule descriptors (rule index, ranges, type, condition
+    values, format hint) without dumping the underlying cell data.
+
+    Args:
+        sheet_name: Restrict to a single sheet. If None, scans all sheets.
+
+    Returns:
+        str: JSON envelope with one entry per CF rule.
+    """
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    if sheet_name:
+        sheets = [_select_sheet(sheets, sheet_name)]
+    out = []
+    for s in sheets:
+        title = s["properties"].get("title", "")
+        rules = s.get("conditionalFormats", []) or []
+        for idx, rule in enumerate(rules):
+            ranges_a1 = [_gridrange_to_a1(r, title) for r in rule.get("ranges", [])]
+            entry: dict = {
+                "sheet_name": title,
+                "rule_index": idx,
+                "ranges": ranges_a1,
+            }
+            if "booleanRule" in rule:
+                cond = rule["booleanRule"].get("condition", {})
+                entry["kind"] = "boolean"
+                entry["condition_type"] = cond.get("type")
+                entry["condition_values"] = [
+                    v.get("userEnteredValue") for v in cond.get("values", [])
+                ]
+            elif "gradientRule" in rule:
+                entry["kind"] = "gradient"
+            out.append(entry)
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "rules": out,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("get_data_validation_rules", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_data_validation_rules(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    List data validation rules in a spreadsheet (or one sheet).
+
+    Reads the grid metadata with a narrow field mask and collects only cells
+    that have dataValidation set. Aggregates by exact rule signature so a
+    300-cell dropdown range comes back as one entry, not 300.
+
+    Returns:
+        str: JSON envelope with rules per sheet (type, criteria values,
+            strict flag, A1 ranges).
+    """
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    if sheet_name:
+        sheets = [_select_sheet(sheets, sheet_name)]
+    sheet_ids = [s["properties"]["sheetId"] for s in sheets]
+    ranges = [s["properties"]["title"] for s in sheets]
+    full = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(
+            spreadsheetId=spreadsheet_id,
+            ranges=ranges,
+            fields=(
+                "sheets.properties(sheetId,title),"
+                "sheets.data.rowData.values.dataValidation,"
+                "sheets.data.startRow,"
+                "sheets.data.startColumn"
+            ),
+        )
+        .execute
+    )
+    out_sheets = []
+    for s in full.get("sheets", []):
+        sid = s["properties"]["sheetId"]
+        if sid not in sheet_ids:
+            continue
+        title = s["properties"].get("title", "")
+        sheet_rules: dict = {}
+        for data_block in s.get("data", []):
+            start_row = data_block.get("startRow", 0)
+            start_col = data_block.get("startColumn", 0)
+            for ri, row in enumerate(data_block.get("rowData", [])):
+                for ci, cell in enumerate(row.get("values", [])):
+                    dv = cell.get("dataValidation")
+                    if not dv:
+                        continue
+                    sig = json.dumps(dv, sort_keys=True)
+                    key = sheet_rules.setdefault(
+                        sig,
+                        {"rule": dv, "cells": []},
+                    )
+                    key["cells"].append((start_row + ri, start_col + ci))
+        for sig, group in sheet_rules.items():
+            cells = group["cells"]
+            out_sheets.append({
+                "sheet_name": title,
+                "condition_type": group["rule"].get("condition", {}).get("type"),
+                "condition_values": [
+                    v.get("userEnteredValue")
+                    for v in group["rule"].get("condition", {}).get("values", [])
+                ],
+                "strict": group["rule"].get("strict"),
+                "show_custom_ui": group["rule"].get("showCustomUi"),
+                "cell_count": len(cells),
+                "first_cell": _gridrange_to_a1(
+                    {
+                        "startRowIndex": cells[0][0],
+                        "endRowIndex": cells[0][0] + 1,
+                        "startColumnIndex": cells[0][1],
+                        "endColumnIndex": cells[0][1] + 1,
+                    },
+                    title,
+                ),
+            })
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "rules": out_sheets,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("get_basic_filter_range", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_basic_filter_range(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    Read the basic filter range currently set on each sheet.
+
+    Useful before vertical merges (filter headers block merges) — gives the
+    A1 of the filter so the caller can clearBasicFilter, do its work, and
+    restore the same filter.
+
+    Returns:
+        str: JSON envelope; per sheet either basic_filter range or null.
+    """
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    if sheet_name:
+        sheets = [_select_sheet(sheets, sheet_name)]
+    out = []
+    for s in sheets:
+        title = s["properties"].get("title", "")
+        bf = s.get("basicFilter")
+        entry: dict = {
+            "sheet_name": title,
+            "sheet_id": s["properties"].get("sheetId"),
+            "basic_filter": None,
+        }
+        if bf and "range" in bf:
+            entry["basic_filter"] = _gridrange_to_a1(bf["range"], title)
+        out.append(entry)
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "sheets": out,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("get_protected_ranges", service_type="sheets")
+@require_google_service("sheets", "sheets_read")
+async def get_protected_ranges(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: Optional[str] = None,
+) -> str:
+    """
+    List protected ranges per sheet.
+
+    Returns the range, protection id, description, warning-only flag and
+    editor list (users / domain / sheet-wide flag) without dumping any cell
+    contents.
+    """
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    if sheet_name:
+        sheets = [_select_sheet(sheets, sheet_name)]
+    out = []
+    for s in sheets:
+        title = s["properties"].get("title", "")
+        for p in s.get("protectedRanges", []) or []:
+            rng = p.get("range", {})
+            editors = p.get("editors", {})
+            out.append({
+                "sheet_name": title,
+                "protected_range_id": p.get("protectedRangeId"),
+                "description": p.get("description"),
+                "warning_only": p.get("warningOnly", False),
+                "whole_sheet": "range" not in p or not rng,
+                "range": _gridrange_to_a1(rng, title) if rng else None,
+                "editors_users": editors.get("users", []),
+                "editors_domain_users_can_edit": editors.get("domainUsersCanEdit", False),
+            })
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "protected_ranges": out,
+    }, ensure_ascii=False)
+
+
+@server.tool()
+@handle_http_errors("renumber_column", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def renumber_column(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    column: str,
+    start_row: int,
+    end_row: int,
+    start_value: int = 1,
+    step: int = 1,
+    skip_blank_in_column: Optional[str] = None,
+    dry_run: bool = False,
+) -> str:
+    """
+    Rewrite a column as a contiguous integer sequence.
+
+    Common case: after reordering rows (move/insert/delete), the "№" column
+    is no longer monotonic. This tool writes start_value, start_value+step,
+    start_value+2*step, ... into column[start_row..end_row] in one updateCells
+    call.
+
+    Args:
+        sheet_name: Sheet to operate on.
+        column: Target column in A1 (e.g. "A").
+        start_row, end_row: Inclusive 1-based row range to renumber.
+        start_value: First number (default 1).
+        step: Increment (default 1).
+        skip_blank_in_column: Optional column letter to inspect. Rows where
+            this column is blank get an empty value (no number). Lets you
+            renumber only the rows that have content somewhere else.
+        dry_run: If True, return the planned values without writing.
+
+    Returns:
+        str: JSON envelope with planned/applied count and a preview of the
+            first/last assignments.
+    """
+    if start_row < 1 or end_row < start_row:
+        raise UserInputError("Invalid start_row/end_row (1-based, end >= start).")
+
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    target = _select_sheet(sheets, sheet_name)
+    sheet_id = target["properties"]["sheetId"]
+
+    col_idx = _column_to_index(column)
+
+    blank_mask: Optional[List[bool]] = None
+    if skip_blank_in_column:
+        check_col = _column_to_index(skip_blank_in_column)
+        check_col_letter = skip_blank_in_column.upper()
+        rng = f"'{sheet_name}'!{check_col_letter}{start_row}:{check_col_letter}{end_row}"
+        resp = await asyncio.to_thread(
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=spreadsheet_id, range=rng)
+            .execute
+        )
+        rows = resp.get("values", [])
+        blank_mask = []
+        for i in range(end_row - start_row + 1):
+            row = rows[i] if i < len(rows) else []
+            val = row[0] if row else ""
+            blank_mask.append(not (isinstance(val, str) and val.strip()) and not val)
+        _ = check_col  # silence linters
+
+    plan: list = []
+    current = start_value
+    for offset in range(end_row - start_row + 1):
+        if blank_mask is not None and blank_mask[offset]:
+            plan.append(None)
+        else:
+            plan.append(current)
+            current += step
+
+    preview = {
+        "first": plan[:3],
+        "last": plan[-3:],
+        "total_rows": len(plan),
+        "non_blank_count": sum(1 for v in plan if v is not None),
+    }
+    if dry_run:
+        return json.dumps({
+            "dry_run": True,
+            "spreadsheet_id": spreadsheet_id,
+            "sheet_name": sheet_name,
+            "column": column.upper(),
+            "preview": preview,
+        }, ensure_ascii=False)
+
+    cells = [
+        {
+            "values": [
+                {
+                    "userEnteredValue": (
+                        {"numberValue": v} if v is not None else {}
+                    )
+                }
+            ]
+        }
+        for v in plan
+    ]
+    req = {
+        "updateCells": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": start_row - 1,
+                "endRowIndex": end_row,
+                "startColumnIndex": col_idx,
+                "endColumnIndex": col_idx + 1,
+            },
+            "rows": cells,
+            "fields": "userEnteredValue",
+        }
+    }
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]})
+        .execute
+    )
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_name": sheet_name,
+        "column": column.upper(),
+        "applied_rows": len(plan),
+        "preview": preview,
+    }, ensure_ascii=False)
