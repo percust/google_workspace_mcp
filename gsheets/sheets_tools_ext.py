@@ -2831,3 +2831,150 @@ async def renumber_column(
         "applied_rows": len(plan),
         "preview": preview,
     }, ensure_ascii=False)
+
+
+# ============================================================================
+# Phase 6: update_cell_rich_text — partial formatting inside a single cell
+# ============================================================================
+
+
+def _runs_to_api_format(runs: List[dict]) -> List[dict]:
+    """Convert user-friendly run specs to Sheets API textFormatRuns.
+
+    Each run must include start_index (0-based offset within the cell text).
+    Optional formatting keys: bold, italic, underline, strikethrough,
+    font_size, font_family, foreground_color (#RRGGBB).
+    """
+    api_runs = []
+    for r in runs:
+        if "start_index" not in r:
+            raise UserInputError("Each run must have 'start_index'.")
+        fmt: dict = {}
+        for src, dst in [
+            ("bold", "bold"),
+            ("italic", "italic"),
+            ("underline", "underline"),
+            ("strikethrough", "strikethrough"),
+            ("font_size", "fontSize"),
+            ("font_family", "fontFamily"),
+        ]:
+            if src in r and r[src] is not None:
+                fmt[dst] = r[src]
+        if "foreground_color" in r and r["foreground_color"]:
+            fmt["foregroundColor"] = _parse_hex_color(r["foreground_color"])
+        api_runs.append({
+            "startIndex": int(r["start_index"]),
+            "format": fmt,
+        })
+    api_runs.sort(key=lambda x: x["startIndex"])
+    if api_runs and api_runs[0]["startIndex"] != 0:
+        # Sheets API requires the first run to start at 0; prepend a default
+        # empty-format run so the cell's default style applies up to the
+        # first user-supplied run.
+        api_runs.insert(0, {"startIndex": 0, "format": {}})
+    return api_runs
+
+
+@server.tool()
+@handle_http_errors("update_cell_rich_text", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def update_cell_rich_text(
+    service,
+    user_google_email: str,
+    spreadsheet_id: str,
+    sheet_name: str,
+    cell: str,
+    text: str,
+    runs: Optional[List[dict]] = None,
+    bold_prefix_length: Optional[int] = None,
+) -> str:
+    """
+    Write text into a single cell with partial inline formatting.
+
+    Sheets API ``textFormatRuns`` lets a single cell carry multiple styled
+    segments (bold start + plain rest, coloured fragments, etc.). The
+    standard format_sheet_range applies one style to the whole cell; this
+    tool covers the in-cell mixed-format case.
+
+    Args:
+        sheet_name: Target sheet.
+        cell: Target cell in A1 (e.g. "A3"). Must be one cell, not a range.
+        text: Full text to write.
+        runs: List of run specs. Each: {start_index, bold?, italic?,
+            underline?, strikethrough?, font_size?, font_family?,
+            foreground_color?}. start_index is 0-based offset within text.
+        bold_prefix_length: Shortcut for the common case "first N chars bold,
+            rest default". Equivalent to runs=[{start_index:0, bold:true},
+            {start_index:N, bold:false}]. Ignored if runs is also given.
+
+    Returns:
+        str: Confirmation envelope with cell, char count, and run count.
+    """
+    if not text:
+        raise UserInputError("text must be non-empty.")
+    rc = cell.strip()
+    if "!" in rc:
+        raise UserInputError(
+            "Pass sheet_name separately; cell must be a bare A1 like 'B3'."
+        )
+    col_letters = ""
+    row_digits = ""
+    for ch in rc:
+        if ch.isalpha():
+            col_letters += ch
+        elif ch.isdigit():
+            row_digits += ch
+        else:
+            raise UserInputError(f"Bad cell reference '{cell}'.")
+    if not col_letters or not row_digits:
+        raise UserInputError(f"Bad cell reference '{cell}'.")
+    col_idx = _column_to_index(col_letters)
+    row_idx = int(row_digits) - 1
+
+    if runs is None and bold_prefix_length is not None:
+        if bold_prefix_length <= 0 or bold_prefix_length > len(text):
+            raise UserInputError(
+                "bold_prefix_length must be in (0, len(text)]."
+            )
+        runs = [
+            {"start_index": 0, "bold": True},
+            {"start_index": bold_prefix_length, "bold": False},
+        ]
+
+    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    target = _select_sheet(sheets, sheet_name)
+    sheet_id = target["properties"]["sheetId"]
+
+    cell_data: dict = {"userEnteredValue": {"stringValue": text}}
+    api_runs = _runs_to_api_format(runs) if runs else []
+    if api_runs:
+        cell_data["textFormatRuns"] = api_runs
+    fields = "userEnteredValue"
+    if api_runs:
+        fields += ",textFormatRuns"
+
+    req = {
+        "updateCells": {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": row_idx,
+                "endRowIndex": row_idx + 1,
+                "startColumnIndex": col_idx,
+                "endColumnIndex": col_idx + 1,
+            },
+            "rows": [{"values": [cell_data]}],
+            "fields": fields,
+        }
+    }
+    await asyncio.to_thread(
+        service.spreadsheets()
+        .batchUpdate(spreadsheetId=spreadsheet_id, body={"requests": [req]})
+        .execute
+    )
+    return json.dumps({
+        "spreadsheet_id": spreadsheet_id,
+        "sheet_name": sheet_name,
+        "cell": rc.upper(),
+        "char_count": len(text),
+        "run_count": len(api_runs),
+    }, ensure_ascii=False)

@@ -118,6 +118,7 @@ sheets:
     - get_basic_filter_range
     - get_protected_ranges
     - renumber_column
+    - update_cell_rich_text
 
 chat:
   core:
