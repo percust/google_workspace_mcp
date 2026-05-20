@@ -2028,3 +2028,321 @@ async def batch_update_spreadsheet(
     if include_responses:
         envelope["replies"] = resp.get("replies", [])
     return json.dumps(envelope, ensure_ascii=False)
+
+
+# ============================================================================
+# Phase 8: copy_sheets_to_spreadsheet — copy/move sheets between spreadsheets
+# ============================================================================
+
+
+@server.tool()
+@handle_http_errors("copy_sheets_to_spreadsheet", service_type="sheets")
+@require_google_service("sheets", "sheets_write")
+async def copy_sheets_to_spreadsheet(
+    service,
+    user_google_email: str,
+    source_spreadsheet_id: str,
+    sheet_names: List[str],
+    destination_spreadsheet_id: str,
+    new_names: Optional[dict] = None,
+    delete_from_source: bool = False,
+    confirm_token: Optional[str] = None,
+) -> str:
+    """
+    Copy (or move) one or more sheet tabs from a source spreadsheet to a destination
+    spreadsheet. Each sheet is copied via spreadsheets.sheets.copyTo, optionally
+    renamed in the destination, and optionally deleted from the source.
+
+    Per-sheet semantics:
+        - Each sheet name in ``sheet_names`` is processed independently. A failure
+          on one sheet (lookup, copy, or rename) does NOT abort the rest; instead
+          the per-sheet status records the error and processing continues.
+        - On a successful copy, if ``new_names[<sheet_name>]`` is provided, the
+          freshly created sheet in the destination is renamed from its default
+          ("Copy of <name>") to the requested name. Rename failures (e.g. name
+          collision in destination) mark the per-sheet status as error but the
+          copy itself stays in place — the caller can rename manually afterward.
+        - When ``delete_from_source=True``, only sheets that copied successfully
+          are deleted from the source. Sheets whose copy failed are left intact.
+
+    Soft-confirm (Phase 7.4 pattern) applies to ``delete_from_source=True``:
+        1) First call with ``delete_from_source=True`` and no ``confirm_token``
+           returns a JSON envelope with ``requires_confirmation=true`` and a
+           one-shot token (TTL 5 min).
+        2) Second call with ``confirm_token`` set and the same
+           ``source_spreadsheet_id`` / ``destination_spreadsheet_id`` /
+           ``sheet_names`` performs the move.
+        Pure copies (``delete_from_source=False``) execute immediately.
+
+    Args:
+        user_google_email (str): The user's Google email. Required.
+        source_spreadsheet_id (str): Spreadsheet ID to copy FROM. Required.
+        sheet_names (List[str]): Sheet tab titles to copy. Required, non-empty.
+        destination_spreadsheet_id (str): Spreadsheet ID to copy TO. Required.
+            May be the same as source for in-spreadsheet duplication, but
+            ``manage_sheet_tab(action='duplicate')`` is cheaper for that case.
+        new_names (dict): Optional map ``{old_name: new_name}`` to rename
+            copied sheets in the destination. Keys must appear in ``sheet_names``.
+        delete_from_source (bool): If True, delete each successfully copied
+            sheet from the source after copying. Requires two-step confirm.
+        confirm_token (str): Confirm token from the first call. Required iff
+            ``delete_from_source=True``.
+
+    Returns:
+        str: JSON envelope. On unconfirmed move: requires_confirmation block.
+            On execution: per-sheet results (status, source_sheet_id, new_sheet_id,
+            final_title, error if any) + counters (copied, renamed, deleted, failed).
+    """
+    logger.info(
+        "[copy_sheets_to_spreadsheet] %s, src=%s, dst=%s, names=%s, delete=%s, has_confirm=%s",
+        user_google_email,
+        source_spreadsheet_id,
+        destination_spreadsheet_id,
+        sheet_names,
+        delete_from_source,
+        bool(confirm_token),
+    )
+
+    # ---- validation ----
+    if not isinstance(sheet_names, list) or not sheet_names:
+        raise UserInputError("sheet_names must be a non-empty list of sheet titles.")
+    if any(not isinstance(n, str) or not n.strip() for n in sheet_names):
+        raise UserInputError("sheet_names entries must be non-empty strings.")
+    if len(set(sheet_names)) != len(sheet_names):
+        raise UserInputError("sheet_names contains duplicates.")
+    if new_names is not None:
+        if not isinstance(new_names, dict):
+            raise UserInputError("new_names must be a dict {old_name: new_name}.")
+        stray = [k for k in new_names if k not in sheet_names]
+        if stray:
+            raise UserInputError(
+                f"new_names contains keys not in sheet_names: {stray}"
+            )
+        if any(not isinstance(v, str) or not v.strip() for v in new_names.values()):
+            raise UserInputError("new_names values must be non-empty strings.")
+    if not destination_spreadsheet_id:
+        raise UserInputError("destination_spreadsheet_id is required.")
+
+    # ---- soft-confirm gate for delete_from_source ----
+    if delete_from_source:
+        confirm_payload = {
+            "source_spreadsheet_id": source_spreadsheet_id,
+            "destination_spreadsheet_id": destination_spreadsheet_id,
+            "sheet_names": sorted(sheet_names),
+        }
+        if not confirm_token:
+            token = _issue_destructive_confirm(
+                "copy_sheets_to_spreadsheet:move", confirm_payload
+            )
+            envelope = {
+                "requires_confirmation": True,
+                "op": "copy_sheets_to_spreadsheet:move",
+                "token": token,
+                "ttl_seconds": _DESTRUCTIVE_CONFIRM_TTL_SECONDS,
+                "source_spreadsheet_id": source_spreadsheet_id,
+                "destination_spreadsheet_id": destination_spreadsheet_id,
+                "sheet_names": sheet_names,
+                "instructions": (
+                    "delete_from_source=True will permanently delete the listed sheets "
+                    "from the source after a successful copy. Show the user the source "
+                    "spreadsheet and sheet names above, get explicit approval, then call "
+                    "copy_sheets_to_spreadsheet again with the SAME arguments and "
+                    "confirm_token set to the value above."
+                ),
+            }
+            return json.dumps(envelope, ensure_ascii=False)
+        _consume_destructive_confirm(
+            "copy_sheets_to_spreadsheet:move", confirm_token, confirm_payload
+        )
+    elif confirm_token:
+        raise UserInputError(
+            "confirm_token was supplied but delete_from_source is False — "
+            "tokens only apply to move operations."
+        )
+
+    new_names_map: dict = new_names or {}
+
+    # ---- source metadata + sheet_id resolution ----
+    source_sheets = await _fetch_sheets_metadata(service, source_spreadsheet_id)
+    by_title: dict = {
+        s["properties"].get("title"): s["properties"].get("sheetId")
+        for s in source_sheets
+    }
+
+    results: list = []
+    deletable_sheet_ids: list = []
+    rename_requests: list = []
+
+    # ---- per-sheet copy + queued rename ----
+    for name in sheet_names:
+        result: dict = {
+            "sheet_name": name,
+            "status": "ok",
+            "source_sheet_id": None,
+            "new_sheet_id": None,
+            "final_title": None,
+            "error": None,
+        }
+        src_id = by_title.get(name)
+        if src_id is None:
+            result["status"] = "error"
+            result["error"] = "sheet not found in source spreadsheet"
+            results.append(result)
+            continue
+        result["source_sheet_id"] = src_id
+
+        try:
+            new_props = await asyncio.to_thread(
+                service.spreadsheets()
+                .sheets()
+                .copyTo(
+                    spreadsheetId=source_spreadsheet_id,
+                    sheetId=src_id,
+                    body={"destinationSpreadsheetId": destination_spreadsheet_id},
+                )
+                .execute
+            )
+        except Exception as exc:  # noqa: BLE001 — surface message, keep loop alive
+            result["status"] = "error"
+            result["error"] = f"copyTo failed: {exc}"
+            results.append(result)
+            continue
+
+        new_sheet_id = new_props.get("sheetId")
+        new_title = new_props.get("title")
+        result["new_sheet_id"] = new_sheet_id
+        result["final_title"] = new_title
+
+        # queue rename. If new_names doesn't override, target = original name
+        # (Sheets API defaults to "Copy of <name>"; the plan says "= original").
+        requested_new_name = new_names_map.get(name, name)
+        if requested_new_name and requested_new_name != new_title:
+            rename_requests.append(
+                (
+                    name,
+                    new_sheet_id,
+                    requested_new_name,
+                    {
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": new_sheet_id,
+                                "title": requested_new_name,
+                            },
+                            "fields": "title",
+                        }
+                    },
+                )
+            )
+
+        deletable_sheet_ids.append((name, src_id))
+        results.append(result)
+
+    # ---- batch rename in destination (one batchUpdate, but track failures per-sheet) ----
+    if rename_requests:
+        # Try the batch first. If it fails (e.g. one collision aborts all),
+        # fall back to per-request attempts so the rest of the renames go through.
+        body = {"requests": [r[3] for r in rename_requests]}
+        try:
+            await asyncio.to_thread(
+                service.spreadsheets()
+                .batchUpdate(spreadsheetId=destination_spreadsheet_id, body=body)
+                .execute
+            )
+            for name, _new_id, requested_new_name, _req in rename_requests:
+                for r in results:
+                    if r["sheet_name"] == name:
+                        r["final_title"] = requested_new_name
+                        break
+        except Exception:
+            # Per-request retry to isolate the offender
+            for name, new_sheet_id, requested_new_name, req in rename_requests:
+                try:
+                    await asyncio.to_thread(
+                        service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=destination_spreadsheet_id,
+                            body={"requests": [req]},
+                        )
+                        .execute
+                    )
+                    for r in results:
+                        if r["sheet_name"] == name:
+                            r["final_title"] = requested_new_name
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    for r in results:
+                        if r["sheet_name"] == name:
+                            r["status"] = "error"
+                            r["error"] = (
+                                f"copy ok, rename to '{requested_new_name}' failed: {exc}"
+                            )
+                            break
+
+    # ---- delete from source for successful copies ----
+    deleted_count = 0
+    if delete_from_source and deletable_sheet_ids:
+        delete_requests = [
+            {"deleteSheet": {"sheetId": src_id}} for _name, src_id in deletable_sheet_ids
+        ]
+        try:
+            await asyncio.to_thread(
+                service.spreadsheets()
+                .batchUpdate(
+                    spreadsheetId=source_spreadsheet_id,
+                    body={"requests": delete_requests},
+                )
+                .execute
+            )
+            deleted_count = len(delete_requests)
+            for name, _src_id in deletable_sheet_ids:
+                for r in results:
+                    if r["sheet_name"] == name:
+                        r["deleted_from_source"] = True
+                        break
+        except Exception as exc:  # noqa: BLE001
+            # If the whole batch delete failed, retry one at a time
+            for name, src_id in deletable_sheet_ids:
+                try:
+                    await asyncio.to_thread(
+                        service.spreadsheets()
+                        .batchUpdate(
+                            spreadsheetId=source_spreadsheet_id,
+                            body={"requests": [{"deleteSheet": {"sheetId": src_id}}]},
+                        )
+                        .execute
+                    )
+                    deleted_count += 1
+                    for r in results:
+                        if r["sheet_name"] == name:
+                            r["deleted_from_source"] = True
+                            break
+                except Exception as inner_exc:  # noqa: BLE001
+                    for r in results:
+                        if r["sheet_name"] == name:
+                            r["deleted_from_source"] = False
+                            existing = r.get("error")
+                            note = f"delete from source failed: {inner_exc}"
+                            r["error"] = f"{existing}; {note}" if existing else note
+                            r["status"] = "error" if r["status"] == "ok" else r["status"]
+                            break
+
+    copied = sum(1 for r in results if r["new_sheet_id"] is not None)
+    failed = sum(1 for r in results if r["status"] == "error")
+    renamed = sum(
+        1
+        for r in results
+        if r["new_sheet_id"] is not None
+        and r["final_title"] == new_names_map.get(r["sheet_name"], r["sheet_name"])
+    )
+
+    envelope = {
+        "source_spreadsheet_id": source_spreadsheet_id,
+        "destination_spreadsheet_id": destination_spreadsheet_id,
+        "requested": len(sheet_names),
+        "copied": copied,
+        "renamed": renamed,
+        "deleted_from_source": deleted_count,
+        "failed": failed,
+        "results": results,
+    }
+    return json.dumps(envelope, ensure_ascii=False)

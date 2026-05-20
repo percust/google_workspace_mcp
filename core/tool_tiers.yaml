@@ -110,6 +110,7 @@ sheets:
     - set_sparse_cells
     - read_sheet_summary
     - batch_update_spreadsheet
+    - copy_sheets_to_spreadsheet
 
 chat:
   core:
