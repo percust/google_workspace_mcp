@@ -132,6 +132,25 @@ async def _fetch_sheets_metadata(service, spreadsheet_id: str) -> list:
     return sheets
 
 
+async def _fetch_sheets_with(service, spreadsheet_id: str, extra: str) -> list:
+    """Fetch sheets with an extended fields mask, e.g. 'merges',
+    'conditionalFormats', 'basicFilter', 'protectedRanges'.
+
+    Kept separate from _fetch_sheets_metadata which is intentionally cheap
+    and used for sheetId/title lookups across many tools.
+    """
+    fields = f"sheets(properties(sheetId,title),{extra})"
+    metadata = await asyncio.to_thread(
+        service.spreadsheets()
+        .get(spreadsheetId=spreadsheet_id, fields=fields)
+        .execute
+    )
+    sheets = metadata.get("sheets", [])
+    if not sheets:
+        raise UserInputError("No sheets found in spreadsheet.")
+    return sheets
+
+
 def _build_border(border_spec: dict) -> dict:
     """Build a Sheets API border object from {style, color, width}."""
     if not isinstance(border_spec, dict):
@@ -2417,7 +2436,7 @@ async def get_merged_ranges(
     Returns:
         str: JSON envelope with per-sheet merge lists (A1 references).
     """
-    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    sheets = await _fetch_sheets_with(service, spreadsheet_id, "merges")
     if sheet_name:
         sheets = [_select_sheet(sheets, sheet_name)]
     out = []
@@ -2504,7 +2523,7 @@ async def get_conditional_formats(
     Returns:
         str: JSON envelope with one entry per CF rule.
     """
-    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    sheets = await _fetch_sheets_with(service, spreadsheet_id, "conditionalFormats")
     if sheet_name:
         sheets = [_select_sheet(sheets, sheet_name)]
     out = []
@@ -2641,7 +2660,7 @@ async def get_basic_filter_range(
     Returns:
         str: JSON envelope; per sheet either basic_filter range or null.
     """
-    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    sheets = await _fetch_sheets_with(service, spreadsheet_id, "basicFilter")
     if sheet_name:
         sheets = [_select_sheet(sheets, sheet_name)]
     out = []
@@ -2678,7 +2697,7 @@ async def get_protected_ranges(
     editor list (users / domain / sheet-wide flag) without dumping any cell
     contents.
     """
-    sheets = await _fetch_sheets_metadata(service, spreadsheet_id)
+    sheets = await _fetch_sheets_with(service, spreadsheet_id, "protectedRanges")
     if sheet_name:
         sheets = [_select_sheet(sheets, sheet_name)]
     out = []
