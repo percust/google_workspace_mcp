@@ -185,7 +185,55 @@ _sheets_efficiency_policy = (
     "batch_update_spreadsheet to preview before committing."
 )
 
-_combined_policy = f"{_streaming_policy}\n\n{_sheets_efficiency_policy}"
+_batch_consolidation_policy = (
+    "Batch consolidation policy (workspace-mcp phase 8):\n"
+    "- Before the FIRST mutation in your reply on a given target object \n"
+    "  (spreadsheet / document / presentation / form / mailbox), enumerate ALL \n"
+    "  planned operations on that object. If you find >=2 same-type operations \n"
+    "  OR >=3 mixed-type operations on the same object, you MUST consolidate \n"
+    "  into a single batch call. Sequential identical tool_calls when a batch \n"
+    "  wrapper exists are a policy violation.\n"
+    "- Sheets (single spreadsheet_id):\n"
+    "  * Multiple modify_sheet_values, format_sheet_range, merge_sheet_range, \n"
+    "    set_range_borders, set_data_validation, sort_range, manage_dimension_group, \n"
+    "    copy_paste_range, insert_cells_with_shift, clear_range_formatting, \n"
+    "    find_replace_sheet -> ONE batch_update_spreadsheet with array of Request \n"
+    "    objects (updateCells, repeatCell, mergeCells, updateBorders, etc.).\n"
+    "  * Multiple manage_sheet_tab(rename|duplicate|reorder) on the same \n"
+    "    spreadsheet -> ONE batch_update_spreadsheet with array of \n"
+    "    updateSheetProperties / duplicateSheet / updateDimensionProperties. \n"
+    "    (manage_sheet_tab(action='delete') stays separate — soft-confirm required.)\n"
+    "  * Scattered writes -> set_sparse_cells, not a dense matrix.\n"
+    "  * Multiple narrow reads from the same spreadsheet -> single \n"
+    "    spreadsheets.values.batchGet via batch_update_spreadsheet is NOT supported; \n"
+    "    instead minimise read calls upstream by planning what you need before \n"
+    "    reading.\n"
+    "- Docs: multiple modify_doc_text / insert_doc_elements / find_and_replace_doc \n"
+    "  / update_paragraph_style on one document -> ONE batch_update_doc.\n"
+    "- Slides: multiple edits on one presentation -> ONE batch_update_presentation.\n"
+    "- Forms: multiple field edits on one form -> ONE batch_update_form.\n"
+    "- Gmail:\n"
+    "  * Label changes on >=2 messages -> batch_modify_gmail_message_labels, \n"
+    "    not a loop of modify_gmail_message_labels.\n"
+    "  * Reading >=2 messages -> get_gmail_messages_content_batch, not a loop of \n"
+    "    get_gmail_message_content. Same for threads -> get_gmail_threads_content_batch.\n"
+    "- Contacts: >=2 create/update/delete -> manage_contacts_batch, not a loop \n"
+    "  of manage_contact.\n"
+    "- NEGATIVE EXAMPLE (DO NOT DO THIS): 5 modify_sheet_values calls in a row \n"
+    "  to rename headers on 5 different sheets of the same spreadsheet. \n"
+    "  CORRECT: one batch_update_spreadsheet with 5 updateCells Request objects.\n"
+    "- NEGATIVE EXAMPLE (DO NOT DO THIS): loop calling \n"
+    "  modify_gmail_message_labels for each id in a list of 20 messages. \n"
+    "  CORRECT: one batch_modify_gmail_message_labels with all 20 ids.\n"
+    "- Exception: if the operations target DIFFERENT objects (different \n"
+    "  spreadsheet_id / document_id / etc.), batch wrappers do not apply — \n"
+    "  sequential calls are correct.\n"
+    "- Exception: if a later operation depends on the RESULT of an earlier one \n"
+    "  (e.g. need new sheet_id from create_sheet before formatting it), the chain \n"
+    "  is unavoidable. State this dependency briefly before the calls."
+)
+
+_combined_policy = f"{_streaming_policy}\n\n{_sheets_efficiency_policy}\n\n{_batch_consolidation_policy}"
 
 if USER_GOOGLE_EMAIL:
     _server_instructions = (
@@ -197,7 +245,7 @@ if USER_GOOGLE_EMAIL:
     logger.info(f"Server instructions configured for user: {USER_GOOGLE_EMAIL}")
 else:
     _server_instructions = _combined_policy
-    logger.info("Server instructions: streaming-only upload policy + sheets efficiency policy")
+    logger.info("Server instructions: streaming-only + sheets efficiency + batch consolidation policy")
 
 server = SecureFastMCP(
     name="google_workspace",
